@@ -151,6 +151,81 @@ index b083fd3..ab22c9b 100644
              return true;
      }
      return false;
+diff --git a/vita3k/modules/SceNet/macos_net_helper.cpp b/vita3k/modules/SceNet/macos_net_helper.cpp
+index 8d7e3b7..21ae9e0 100644
+--- a/vita3k/modules/SceNet/macos_net_helper.cpp
++++ b/vita3k/modules/SceNet/macos_net_helper.cpp
+@@ -17,7 +17,10 @@
+ 
+ #include "macos_net_helper.h"
+ 
++#include <TargetConditionals.h>
++#if !TARGET_OS_IPHONE
+ #include <SystemConfiguration/SystemConfiguration.h>
++#endif
+ #include <cstring>
+ #include <ifaddrs.h>
+ #include <net/if.h>
+@@ -28,6 +31,7 @@ bool is_physical_interface(const char *name) {
+     return name && strncmp(name, "en", 2) == 0;
+ }
+ 
++#if !TARGET_OS_IPHONE
+ // Get the primary network interface name using SystemConfiguration
+ bool get_primary_interface_name(char *dest, size_t bufferSize) {
+     bool success = false;
+@@ -65,6 +69,51 @@ bool get_primary_interface_name(char *dest, size_t bufferSize) {
+     CFRelease(store);
+     return success;
+ }
++#else
++// iOS portability: SCDynamicStoreCreate/CopyValue are explicitly marked
++// unavailable on iOS (SystemConfiguration's dynamic-store API is a macOS-only
++// facility). There is no direct iOS replacement for "the interface backing
++// the default route", so fall back to a plain interface scan: prefer Wi-Fi
++// (en0), then cellular data (pdp_ip0), then the first other up/non-loopback
++// interface. Good enough for the network-identity hint this feeds.
++bool get_primary_interface_name(char *dest, size_t bufferSize) {
++    struct ifaddrs *iflist = nullptr;
++    if (getifaddrs(&iflist) != 0)
++        return false;
++
++    const char *preferred[] = { "en0", "pdp_ip0" };
++    bool success = false;
++
++    for (const char *want : preferred) {
++        for (struct ifaddrs *cur = iflist; cur; cur = cur->ifa_next) {
++            if (!cur->ifa_name || !(cur->ifa_flags & IFF_UP) || (cur->ifa_flags & IFF_LOOPBACK))
++                continue;
++            if (strcmp(cur->ifa_name, want) == 0) {
++                strncpy(dest, cur->ifa_name, bufferSize - 1);
++                dest[bufferSize - 1] = '\0';
++                success = true;
++                break;
++            }
++        }
++        if (success)
++            break;
++    }
++
++    if (!success) {
++        for (struct ifaddrs *cur = iflist; cur; cur = cur->ifa_next) {
++            if (!cur->ifa_name || !(cur->ifa_flags & IFF_UP) || (cur->ifa_flags & IFF_LOOPBACK))
++                continue;
++            strncpy(dest, cur->ifa_name, bufferSize - 1);
++            dest[bufferSize - 1] = '\0';
++            success = true;
++            break;
++        }
++    }
++
++    freeifaddrs(iflist);
++    return success;
++}
++#endif
+ 
+ // Get MAC address from a physical interface
+ // If hint is a physical interface, use it; otherwise find first active en*
 diff --git a/vita3k/modules/SceSysmodule/SceSysmodule.cpp b/vita3k/modules/SceSysmodule/SceSysmodule.cpp
 index a7ced6a..a7f0dd6 100644
 --- a/vita3k/modules/SceSysmodule/SceSysmodule.cpp
@@ -214,6 +289,117 @@ index fff2007..d306cfb 100644
              continue;
  
          const std::lock_guard<std::mutex> guard(*dest->voice_mutex);
+diff --git a/vita3k/renderer/CMakeLists.txt b/vita3k/renderer/CMakeLists.txt
+index 0e40944..cf432a9 100644
+--- a/vita3k/renderer/CMakeLists.txt
++++ b/vita3k/renderer/CMakeLists.txt
+@@ -56,8 +56,14 @@ if(ANDROID)
+ endif()
+ 
+ if(APPLE)
++	# This Obj-C++ source's body is macOS-only (no-ops on iOS, see the file for
++	# why) but is still fine to compile there; Cocoa (AppKit) itself doesn't
++	# exist in the iOS SDK though, so only link it for macOS.
+ 	target_sources(renderer PRIVATE src/vulkan/metal_layer.mm)
+-	target_link_libraries(renderer PRIVATE "-framework QuartzCore" "-framework Cocoa")
++	target_link_libraries(renderer PRIVATE "-framework QuartzCore")
++	if(NOT IOS)
++		target_link_libraries(renderer PRIVATE "-framework Cocoa")
++	endif()
+ endif()
+ 
+ if(X11_FOUND)
+diff --git a/vita3k/renderer/include/renderer/frame_host.h b/vita3k/renderer/include/renderer/frame_host.h
+index cc3a1cc..be0b0a6 100644
+--- a/vita3k/renderer/include/renderer/frame_host.h
++++ b/vita3k/renderer/include/renderer/frame_host.h
+@@ -48,12 +48,21 @@ struct AndroidDisplayHandle {
+     SDL_Window *window = nullptr;
+ };
+ 
++// iOS: unlike macOS there is no AppKit/NSView to pull a CAMetalLayer out of, so
++// the host app hands the layer pointer straight to us (mirrors how
++// AndroidDisplayHandle carries a pre-resolved SDL_Window rather than deriving
++// one). Populating this is a front-end concern (out of scope here).
++struct IOSDisplayHandle {
++    void *metal_layer = nullptr; // CAMetalLayer*, opaque to avoid an Obj-C dependency here
++};
++
+ using DisplayHandle = std::variant<std::monostate,
+     Win32DisplayHandle,
+     MacOSDisplayHandle,
+     X11DisplayHandle,
+     WaylandDisplayHandle,
+-    AndroidDisplayHandle>;
++    AndroidDisplayHandle,
++    IOSDisplayHandle>;
+ 
+ class FrameHost {
+ public:
+diff --git a/vita3k/renderer/src/vulkan/metal_layer.mm b/vita3k/renderer/src/vulkan/metal_layer.mm
+index 21157a2..0a68921 100644
+--- a/vita3k/renderer/src/vulkan/metal_layer.mm
++++ b/vita3k/renderer/src/vulkan/metal_layer.mm
+@@ -15,9 +15,17 @@
+ // with this program; if not, write to the Free Software Foundation, Inc.,
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
++// macOS-only: Cocoa/NSView do not exist on iOS (UIKit has UIView instead, and
++// on iOS the CAMetalLayer is passed to us directly -- see IOSDisplayHandle in
++// renderer/frame_host.h -- so there is nothing for this translation unit to
++// do there). Compiled unconditionally by CMake on every Apple target, so
++// guard the body rather than the file.
++#import <TargetConditionals.h>
++#if !TARGET_OS_IPHONE
+ #import <Cocoa/Cocoa.h>
+ #import <QuartzCore/CAMetalLayer.h>
+ 
+ extern "C" void *get_metal_layer_from_view(void *nsview) {
+     return (__bridge void *)((__bridge NSView *)nsview).layer;
+ }
++#endif
+diff --git a/vita3k/renderer/src/vulkan/screen_renderer.cpp b/vita3k/renderer/src/vulkan/screen_renderer.cpp
+index 5cb0277..017b49a 100644
+--- a/vita3k/renderer/src/vulkan/screen_renderer.cpp
++++ b/vita3k/renderer/src/vulkan/screen_renderer.cpp
+@@ -27,6 +27,7 @@
+ #ifdef _WIN32
+ #include <vulkan/vulkan_win32.h>
+ #elif defined(__APPLE__)
++#include <TargetConditionals.h>
+ #include <vkutil/native_surface.h>
+ #include <vulkan/vulkan_metal.h>
+ #elif defined(__linux__) && !defined(__ANDROID__)
+@@ -98,7 +99,7 @@ bool ScreenRenderer::create() {
+         surface_created = true;
+ #endif
+     } else if (const auto *handle = std::get_if<renderer::MacOSDisplayHandle>(&display_handle)) {
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !TARGET_OS_IPHONE
+         void *metal_layer = get_metal_layer_from_view(handle->view);
+         if (!metal_layer) {
+             LOG_ERROR("Failed to get CAMetalLayer from NSView");
+@@ -109,6 +110,20 @@ bool ScreenRenderer::create() {
+         create_info.pLayer = static_cast<const CAMetalLayer *>(metal_layer);
+         this->surface = state.instance.createMetalSurfaceEXT(create_info);
+         surface_created = true;
++#endif
++    } else if (const auto *handle = std::get_if<renderer::IOSDisplayHandle>(&display_handle)) {
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++        // No NSView/Cocoa on iOS: the host app resolves the CAMetalLayer itself
++        // (e.g. from a UIView) and hands it to us directly (see frame_host.h).
++        if (!handle->metal_layer) {
++            LOG_ERROR("iOS display handle has no CAMetalLayer");
++            return false;
++        }
++
++        vk::MetalSurfaceCreateInfoEXT create_info{};
++        create_info.pLayer = static_cast<const CAMetalLayer *>(handle->metal_layer);
++        this->surface = state.instance.createMetalSurfaceEXT(create_info);
++        surface_created = true;
+ #endif
+     } else if (const auto *handle = std::get_if<renderer::AndroidDisplayHandle>(&display_handle)) {
+ #ifdef __ANDROID__
 diff --git a/vita3k/util/include/util/vector_utils.h b/vita3k/util/include/util/vector_utils.h
 index e9ca88c..60449a1 100644
 --- a/vita3k/util/include/util/vector_utils.h
@@ -285,3 +471,22 @@ index 3919dc4..d7f2037 100644
      });
  }
  
+diff --git a/vita3k/vkutil/include/vkutil/native_surface.h b/vita3k/vkutil/include/vkutil/native_surface.h
+index d931e7f..1791a2d 100644
+--- a/vita3k/vkutil/include/vkutil/native_surface.h
++++ b/vita3k/vkutil/include/vkutil/native_surface.h
+@@ -17,6 +17,13 @@
+ 
+ #pragma once
+ 
+-#ifdef __APPLE__
++// iOS portability: this helper pulls a CAMetalLayer* out of an AppKit NSView,
++// which only exists on macOS (AppKit is unavailable on iOS/UIKit). On iOS the
++// CAMetalLayer is instead handed to us directly via IOSDisplayHandle, so this
++// declaration -- and its .mm implementation -- are macOS-only.
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#if !TARGET_OS_IPHONE
+ extern "C" void *get_metal_layer_from_view(void *nsview);
+ #endif
++#endif

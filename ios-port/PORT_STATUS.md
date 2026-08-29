@@ -8,17 +8,31 @@ clang 18 / lld. No Xcode, no macOS. See `toolchain/ios-arm64.cmake`.
 
 ## The JIT reality (foundation — must hold or nothing runs)
 
-The target iPad is an A15+/M-series (TXM/SPTM) device on iOS 18.4–26. Apple
-removed the classic sideload-JIT model there: `CS_DEBUGGED` alone no longer
-lets an app execute self-written pages. The surviving path is StikDebug's
-**JIT26 `brk #0xf00d` handshake** — the app asks the attached debugger to
-prepare each executable region (see `../ios-conversion/src/main.m`, build 7).
-Confirming this executes on the user's device is the gate for the whole port.
+The target iPad runs **iPadOS 27** (A15+/M-series, TXM/SPTM). Since iOS 18.4,
+`CS_DEBUGGED` alone no longer lets an app execute self-written pages; iOS 27
+widened TXM-class enforcement to essentially all hardware (StikDebug PR #416,
+3.1.6, 2026-06-17), which is why "26.6 and 27 only work with a few apps".
 
-Consequence for the emulator: dynarmic allocates its code cache on demand,
-which is incompatible with the "prepare-while-attached, then detach" model.
-The JIT allocator must be reworked to a **fixed, pre-prepared code arena**
-allocated while StikDebug is attached (task: patch oaknut/dynarmic).
+**Root cause of the SIGBUS we measured on device:** StikDebug looks up a JIT
+*script* for the target bundle id when enabling JIT. With none attached it does
+a BARE attach — the process gets `CS_DEBUGGED` (we measured `0x32003005`) and
+nothing else, so no executable region is ever prepared and every execute faults.
+Vita3K is not in StikDebug's `AutoScriptAssignments`, so no script was bound.
+The user-assigned script map is consulted first, so binding `universal.js`
+manually (or via `stikdebug://enable-jit?...&script-name=universal.js`, which
+the app now does in one tap) works with no upstream change.
+
+The surviving mechanism is StikDebug's **JIT26 `brk #0xf00d` handshake**
+(protocol unchanged for 27): wait for `CS_DEBUGGED`, `JIT26PrepareRegion` every
+RX region **while attached**, dual-map a writable alias, `JIT26Detach`, then
+write via RW and execute via RX. A `brk` with no script attached crashes the
+process, and it can *hang*, so the app runs it on a worker thread under a
+SIGTRAP guard with an 8 s timeout and a legacy `brk #0x69` fallback.
+
+**Consequence for the emulator:** regions created *after* detach can never be
+made executable. dynarmic allocates its code cache on demand, which is
+incompatible with that. The JIT allocator must be reworked to a **single fixed,
+pre-prepared arena** allocated while StikDebug is attached (task #9).
 
 ## Progress
 
@@ -28,12 +42,11 @@ allocated while StikDebug is attached (task: patch oaknut/dynarmic).
 | **dynarmic (ARM dynamic recompiler — the JIT core)** | ✅ **cross-compiles to `libdynarmic.a` (arm64 Mach-O, 119 objects)** — the hardest, riskiest piece builds |
 | oaknut ARM64 emitter | ✅ builds (bundled in dynarmic) |
 | Boost (header-only, for dynarmic) | ✅ isolated headers wired |
-| JIT allocator patched for iOS 26 (JIT26 + pre-prepared arena) | ⬜ next |
+| JIT allocator reworked for iOS 26/27 (JIT26 + pre-prepared arena) | ⬜ **the biggest remaining runtime risk** |
 | **FFmpeg (avcodec/avformat/avutil/swscale/swresample)** | ✅ **cross-built from source, n6.1, H.264/AAC/MP3** (no iOS prebuilt exists — done the hard way) |
 | **OpenSSL 3.3.2 (libssl/libcrypto)** | ✅ built |
 | **libcurl 8.11.0** | ✅ built (Apple Secure Transport TLS, self-contained) |
 | **boost::filesystem + system** | ✅ compiled from source |
-| SDL3 (iOS/UIKit) | ⬜ (upstream supports iOS) |
 | MoltenVK (Vulkan→Metal) | ✅ prebuilt ios-arm64 `libMoltenVK.a` + Vulkan headers staged |
 | **SPIRV-Cross (shader translation, incl. MSL→Metal backend)** | ✅ **cross-compiles to 8 arm64 Mach-O libs (core/glsl/hlsl/msl/cpp/reflect/util/c)** |
 | **glslang (GLSL→SPIR-V front-end)** | ✅ builds (libglslang.a + resource-limits) |
@@ -42,7 +55,8 @@ allocated while StikDebug is attached (task: patch oaknut/dynarmic).
 | **fmt / spdlog / yaml-cpp / pugixml** | ✅ all build for arm64-ios |
 | builtin SPIR-V shaders | ✅ reusable verbatim from APK |
 | **Dependency tree (all 28 libs)** | ✅ **COMPLETE — every Vita3K dependency cross-compiles for arm64-iOS** (staged in `/home/user/ios-deps`) |
-| Vita3K core static lib (`libVita3K`) | ⬜ next: make Vita3K's own CMake iOS-aware, then compile |
+| **Vita3K core modules (per-module clang compile, not full CMake yet)** | ✅ **all 38 non-Qt/non-Android core modules compile clean to arm64 Mach-O** (plus `interface.cpp`/`performance.cpp` and 3 header-only interface libs), incl. **renderer** (Vulkan/MoltenVK + GL backends, `.mm` Metal-layer glue), **cpu** (dynarmic integration), gxm, kernel, mem, audio, ctrl, np, packages, touch, and all 216 `modules/` Sce* HLE handlers — 403 objects total. Archived to `.a` in `/home/user/ios-deps/lib/vita3k-core/`. Only `gui-qt` (Qt desktop UI) and `android/jni` (Android bridge) are unbuilt, both out of scope for iOS. See `ios-port/build-scripts/` for the compile driver and `ios-port/patches/` for the source diffs. |
+| Real top-level CMake iOS build (vs. per-module clang) | ⬜ next |
 | Headless "core boots" on device | ⬜ |
 | **iOS front-end (touch UI, game loading, controls)** | 🟢 **builds & runs, feature-rich**: `Vita3K.ipa` — Library (real param.sfo titles, real VPK extraction), Game Detail (metadata, save data, play/delete), Settings, About, First-Run onboarding (JIT guide), Firmware install, Controller mapping (GameController), full on-screen Vita gamepad, Enable-JIT. 12 source files. Emulator core wires in behind the `Vita3KCore` bridge. |
 
@@ -80,7 +94,7 @@ placeholders and the UI runs in "preview" mode.
 This is a real, multi-session engineering project. The CPU/JIT core — assumed
 to be the hard part — now builds for iOS, which is the biggest single
 de-risking step. The remaining cost is dependency bring-up and, above all, a
-new iOS front-end. iOS 26 additionally penalizes JIT reliability (it revokes
-execute on idle JIT pages), so even a complete port may be imperfect on the
-newest iOS. "Boots and plays" is the goal; Uncharted: Golden Abyss specifically
+new iOS front-end. On iOS 27 the JIT path is narrow but real: it works only for apps that ask the
+attached debugger to bless each executable region up front, with a script bound
+in StikDebug. iOS 27 is also still in beta, so this can change at GM. "Boots and plays" is the goal; Uncharted: Golden Abyss specifically
 is a hard title even on desktop Vita3K.
