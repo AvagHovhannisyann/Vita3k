@@ -59,6 +59,14 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key><true/>
 	<key>GCSupportsControllerUserInteraction</key><true/>
 
+	<!-- Needed for canOpenURL(stikdebug://) — the JIT enabler on iOS 18.4+/26/27 -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>stikdebug</string>
+		<string>sidestore</string>
+		<string>altstore</string>
+	</array>
+
 	<key>ITSAppUsesNonExemptEncryption</key><false/>
 </dict>
 </plist>

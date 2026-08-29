@@ -54,6 +54,15 @@ typedef NS_ENUM(NSInteger, V3KJITState) {
 /// Decoded code-signing flags, e.g. "0x32003005 [valid get-task-allow enforcement
 /// require-LV dyld-platform DEBUGGED signed]".
 - (NSString *)codeSigningFlagsDescription;
+/// Open StikDebug and ask it to enable JIT for this app, binding universal.js
+/// (the script that answers the brk handshake). Returns NO if StikDebug isn't
+/// installed. THIS is the step most users are missing: without an attached
+/// script StikDebug does a bare attach — CS_DEBUGGED gets set but no executable
+/// region is ever prepared, so every execute faults.
+- (BOOL)requestJITViaStikDebug;
+/// YES if a StikDebug-compatible URL handler is present.
+@property (nonatomic, readonly) BOOL stikDebugAvailable;
+
 /// Run EVERY known route to executable memory and return a full multi-line
 /// report (which strategy worked, or how each failed, with signal names).
 /// Never crashes: all probes are fault-guarded. Safe to call repeatedly.

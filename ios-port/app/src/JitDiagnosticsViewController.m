@@ -6,6 +6,7 @@
     UITextView *_report;
     UILabel *_headline;
     UIButton *_run;
+    UIButton *_enable;
     NSTimer *_poll;
 }
 
@@ -43,6 +44,18 @@
     [_run addTarget:self action:@selector(runTest) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_run];
 
+    _enable = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_enable setTitle:@"Enable JIT via StikDebug" forState:UIControlStateNormal];
+    [_enable setTitleColor:V3KText() forState:UIControlStateNormal];
+    _enable.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    _enable.backgroundColor = V3KCard();
+    _enable.layer.cornerRadius = 12;
+    _enable.layer.borderWidth = 1;
+    _enable.layer.borderColor = V3KGold().CGColor;
+    _enable.translatesAutoresizingMaskIntoConstraints = NO;
+    [_enable addTarget:self action:@selector(enableViaStikDebug) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_enable];
+
     UILayoutGuide *g = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [_headline.topAnchor constraintEqualToAnchor:g.topAnchor constant:16],
@@ -51,7 +64,11 @@
         [_report.topAnchor constraintEqualToAnchor:_headline.bottomAnchor constant:14],
         [_report.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
         [_report.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-        [_report.bottomAnchor constraintEqualToAnchor:_run.topAnchor constant:-14],
+        [_report.bottomAnchor constraintEqualToAnchor:_enable.topAnchor constant:-14],
+        [_enable.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
+        [_enable.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
+        [_enable.heightAnchor constraintEqualToConstant:52],
+        [_enable.bottomAnchor constraintEqualToAnchor:_run.topAnchor constant:-10],
         [_run.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
         [_run.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
         [_run.heightAnchor constraintEqualToConstant:52],
@@ -76,6 +93,18 @@
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     [_poll invalidate]; _poll = nil;
+}
+
+- (void)enableViaStikDebug {
+    if ([Vita3KCore.shared requestJITViaStikDebug]) return;
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"StikDebug not found"
+                         message:@"Install StikDebug 3.1.6 or newer, then in StikDebug long-press Vita3K, "
+                                  "choose Attach Script and pick universal.js. Without an attached script "
+                                  "StikDebug only marks the app debugged and never prepares executable memory."
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 - (void)runTest {

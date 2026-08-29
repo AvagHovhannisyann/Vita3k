@@ -49,6 +49,10 @@ __attribute__((noinline, naked)) static void *JIT26PrepareRegion(void *addr, uns
 __attribute__((noinline, naked)) static void JIT26Detach(void) {
     __asm__ volatile("mov x16, #0\n\t brk #0xf00d\n\t ret\n\t");
 }
+// Older StikDebug scripts answered a different immediate; kept as a fallback.
+__attribute__((noinline, naked)) static void *JITLegacyPrepare(void *addr, unsigned long len) {
+    __asm__ volatile("mov x16, #1\n\t brk #0x69\n\t ret\n\t");
+}
 extern int csops(pid_t pid, unsigned int ops, void *buf, size_t size);
 #define CS_OPS_STATUS 0
 #define CS_DEBUGGED   0x10000000u
@@ -56,6 +60,36 @@ extern int csops(pid_t pid, unsigned int ops, void *buf, size_t size);
 static sigjmp_buf g_jb;
 static volatile int g_lastsig;   // signal that aborted the last guarded probe
 static void v3k_sig(int s) { g_lastsig = s; siglongjmp(g_jb, 1); }
+
+// The brk #0xf00d handshake can HANG if no debugger script answers it (and a
+// bare brk with nothing attached would kill the process), so run it on a worker
+// thread under a SIGTRAP guard and give up after `seconds`. Returns the prepared
+// RX region, or NULL (with *why set) on fault/timeout.
+static void *prepare_region_guarded(unsigned long len, double seconds, const char **why, BOOL legacy) {
+    __block void *out = NULL;
+    __block int sig = 0;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        struct sigaction sa = {0}, ot = {0};
+        sa.sa_handler = v3k_sig;
+        sigaction(SIGTRAP, &sa, &ot);
+        g_lastsig = 0;
+        if (sigsetjmp(g_jb, 1) == 0) {
+            out = legacy ? JITLegacyPrepare(NULL, len) : JIT26PrepareRegion(NULL, len);
+        } else {
+            out = NULL; sig = g_lastsig;
+        }
+        sigaction(SIGTRAP, &ot, NULL);
+        dispatch_semaphore_signal(done);
+    });
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW,
+                                (int64_t)(seconds * NSEC_PER_SEC))) != 0) {
+        if (why) *why = "timed out (no debugger script answered)";
+        return NULL;                       // worker may still be parked in the brk
+    }
+    if (!out && why) *why = sig ? "faulted" : "declined";
+    return out;
+}
 
 @implementation V3KTitle @end
 
@@ -362,15 +396,16 @@ static int guarded_exec(void *mem, const char **sigOut) {
     if (!dbg) {
         [r appendString:@"A JIT26 handshake: skipped (not debugged — enable JIT in StikDebug first)\n"];
     } else {
-        void *rx = NULL;
-        struct sigaction sa = {0}, ot = {0};
-        sa.sa_handler = v3k_sig; sigaction(SIGTRAP, &sa, &ot);
-        g_lastsig = 0;
-        if (sigsetjmp(g_jb, 1) == 0) rx = JIT26PrepareRegion(NULL, len); else rx = NULL;
-        sigaction(SIGTRAP, &ot, NULL);
+        const char *why = "declined";
+        void *rx = prepare_region_guarded(len, 8.0, &why, NO);
         if (!rx || rx == (void *)-1) {
-            [r appendFormat:@"A JIT26 handshake: no region (%s) — StikDebug may not implement it\n",
-                            g_lastsig ? signame_(g_lastsig) : "declined"];
+            const char *why2 = "declined";
+            rx = prepare_region_guarded(len, 4.0, &why2, YES);   // legacy brk #0x69
+            if (rx && rx != (void *)-1) [r appendString:@"A JIT26: legacy brk #0x69 answered\n"];
+        }
+        if (!rx || rx == (void *)-1) {
+            [r appendFormat:@"A JIT26 handshake: no region (%s)\n"
+                            @"   -> In StikDebug: long-press Vita3K, Attach Script, universal.js\n", why];
         } else {
             mach_vm_address_t rw = 0; vm_prot_t cur = 0, mx = 0;
             kern_return_t kr = mach_vm_remap(mach_task_self(), &rw, len, 0, VM_FLAGS_ANYWHERE,
@@ -457,6 +492,29 @@ static int guarded_exec(void *mem, const char **sigOut) {
     else      [r appendString:@"The process IS debugged but the kernel still refuses execute.\n"
                               @"On iOS 26/27 this usually means the JIT26 protocol did not complete.\n"];
     return r;
+}
+
+
+#pragma mark - StikDebug integration
+
+- (NSURL *)stikDebugJITURL {
+    // Ask StikDebug to attach AND bind universal.js, which is what answers the
+    // brk #0xf00d handshake. Passing the pid lets it target this exact process.
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier ?: @"org.vita3k.emulator";
+    NSString *s = [NSString stringWithFormat:
+        @"stikdebug://enable-jit?bundle-id=%@&pid=%d&script-name=universal.js", bid, getpid()];
+    return [NSURL URLWithString:s];
+}
+
+- (BOOL)stikDebugAvailable {
+    return [UIApplication.sharedApplication canOpenURL:[self stikDebugJITURL]];
+}
+
+- (BOOL)requestJITViaStikDebug {
+    NSURL *u = [self stikDebugJITURL];
+    if (![UIApplication.sharedApplication canOpenURL:u]) return NO;
+    [UIApplication.sharedApplication openURL:u options:@{} completionHandler:nil];
+    return YES;
 }
 
 @end
