@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  get-task-allow = true is the entitlement that makes a sideload-signed build
+	  debuggable, which is exactly what StikDebug / JITStreamer / a paired debugger
+	  needs to attach and flip the process into a JIT-capable state so Vita3K's
+	  Dynarmic recompiler can execute the ARM64 code it emits at runtime.
+
+	  Free Apple ID (7-day) provisioning ALWAYS sets get-task-allow=true, so
+	  Sideloadly will keep this on automatically. Do not strip it.
+	-->
+	<key>get-task-allow</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>ConvertedApp</string>
+	<key>CFBundleDisplayName</key>
+	<string>Vita3K</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.vita3k.emulator</string>
+	<key>CFBundleExecutable</key>
+	<string>ConvertedApp</string>
+	<key>CFBundleVersion</key>
+	<string>0.2.1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.1</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>MinimumOSVersion</key>
+	<string>12.0</string>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>
+		<integer>2</integer>
+	</array>
+	<key>DTPlatformName</key>
+	<string>iphoneos</string>
+
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+		<string>metal</string>
+	</array>
+
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+	</array>
+	<key>UIRequiresFullScreen</key>
+	<true/>
+	<key>UIStatusBarHidden</key>
+	<true/>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+	<key>UILaunchScreen</key>
+	<dict/>
+
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconName</key>
+			<string>AppIcon</string>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon120</string>
+				<string>AppIcon180</string>
+			</array>
+		</dict>
+	</dict>
+	<key>CFBundleIcons~ipad</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconName</key>
+			<string>AppIcon</string>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon120</string>
+				<string>AppIcon152</string>
+				<string>AppIcon167</string>
+				<string>AppIcon180</string>
+			</array>
+		</dict>
+	</dict>
+	<key>CFBundleIconFiles</key>
+	<array>
+		<string>AppIcon120</string>
+		<string>AppIcon152</string>
+		<string>AppIcon167</string>
+		<string>AppIcon180</string>
+	</array>
+
+	<!-- Game controller support (Android hardware.gamepad -> GameController) -->
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+	<key>GCSupportsControllerUserInteraction</key>
+	<true/>
+
+	<!-- External storage (Android READ/WRITE/MANAGE_EXTERNAL_STORAGE) -> Files / document sharing -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+
+	<!-- Permission usage strings (Android uses-permission / uses-feature) -->
+	<key>NSCameraUsageDescription</key>
+	<string>Vita3K uses the camera to emulate the PS Vita camera.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Vita3K uses the microphone to emulate the PS Vita microphone.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Vita3K connects to Bluetooth game controllers.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Vita3K uses the local network for ad-hoc multiplayer emulation.</string>
+
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+</dict>
+</plist>
