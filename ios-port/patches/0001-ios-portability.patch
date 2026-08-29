@@ -336,6 +336,34 @@ index cc3a1cc..be0b0a6 100644
  
  class FrameHost {
  public:
+diff --git a/vita3k/renderer/src/creation.cpp b/vita3k/renderer/src/creation.cpp
+index ed8ad97..7e8d9ca 100644
+--- a/vita3k/renderer/src/creation.cpp
++++ b/vita3k/renderer/src/creation.cpp
+@@ -255,6 +255,15 @@ void destroy(SceGxmSyncObject *sync, State &state) {
+ 
+ bool init(FrameHost &frame, std::unique_ptr<State> &state, Backend backend, const Config &config, const Root &root_paths) {
+     switch (backend) {
++#if !defined(IOS)
++    // iOS has no OpenGL ES context path in this port (no EAGL/GLKit use here,
++    // and MoltenVK/Vulkan is the only renderer wired up) -- excluding this
++    // case keeps every gl:: object (and its ~110 glad_gl*/OpenGL entry
++    // points) out of the iOS link entirely, rather than needing a GLES
++    // loader (glad) built and linked for a backend nothing on this platform
++    // ever selects. Config::CurrentConfig::backend_renderer still defaults
++    // to "Vulkan", so this is unreachable in practice; the guard just stops
++    // the linker from requiring gl::create()'s object graph to exist.
+     case Backend::OpenGL:
+         state = std::make_unique<gl::GLState>();
+         state->frame = &frame;
+@@ -262,6 +271,7 @@ bool init(FrameHost &frame, std::unique_ptr<State> &state, Backend backend, cons
+         if (!gl::create(state, config))
+             return false;
+         break;
++#endif
+ 
+     case Backend::Vulkan:
+         state = std::make_unique<vulkan::VKState>(config.current_config.gpu_idx);
 diff --git a/vita3k/renderer/src/vulkan/metal_layer.mm b/vita3k/renderer/src/vulkan/metal_layer.mm
 index 21157a2..0a68921 100644
 --- a/vita3k/renderer/src/vulkan/metal_layer.mm

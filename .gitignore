@@ -1,3 +1,7 @@
 # reproducible build output (regenerate with ios-conversion/build.sh)
 ios-conversion/out/
 *.o
+
+# 24MB full-core build — delivered directly, not tracked
+Vita3K-full.ipa
+ios-port/app/out-full/

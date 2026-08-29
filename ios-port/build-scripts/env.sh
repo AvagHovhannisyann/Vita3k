@@ -55,7 +55,16 @@ INCLUDE_FLAGS="$INCLUDE_FLAGS \
 -I$SCRATCH/build/gen \
 -I$SCRATCH/build/gen/lang_generated"
 
+# NOTE: deliberately NOT defining TRACY_ENABLE below (not even =0). The tree
+# guards tracy usage with `#ifdef TRACY_ENABLE`, so defining it to ANY value
+# (this used to say -DTRACY_ENABLE=0) makes that guard true and pulls in real
+# tracy::* calls with nothing to satisfy them at link time, since we don't
+# build/link the real Tracy client. See apply_tracy_fix.sh and the link
+# report for the 5 objects (kernel.cpp, renderer/src/batch.cpp,
+# modules/SceAppMgr, modules/SceAVConfig, modules/SceDisplay) that were
+# compiled with the old broken flag and need recompiling (or patching, via
+# apply_tracy_fix.sh) if reusing prebuilt libs from before this fix.
 COMMON_FLAGS="-std=c++23 -stdlib=libc++ -isysroot $SDK -target arm64-apple-ios14.0 \
--w -DIOS=1 -DTRACY_ENABLE=0 \
+-w -DIOS=1 \
 -DSPDLOG_FMT_EXTERNAL -DSPDLOG_NO_THREAD_ID -DSPDLOG_WCHAR_FILENAMES \
 -DBOOST_ASIO_DISABLE_STD_COROUTINE -DONLY_MSPACES=1 -DUSE_LOCK=0"
