@@ -148,7 +148,13 @@ static id makeLabel(CGRect frame, const char *text, CGFloat font, int bold, id c
 static long g_jbuf[256] __attribute__((aligned(16)));      /* oversized sigjmp_buf   */
 static struct d_sigaction g_old_bus, g_old_segv, g_old_ill;
 
-static void fault_handler(int sig) { (void)sig; siglongjmp(g_jbuf, 1); }
+static volatile int g_lastsig;          /* signal that aborted the last probe */
+
+static void fault_handler(int sig) { g_lastsig = sig; siglongjmp(g_jbuf, 1); }
+
+static const char *signame(int s) {
+    return s == SIGILL ? "SIGILL" : s == SIGBUS ? "SIGBUS" : s == SIGSEGV ? "SIGSEGV" : "fault";
+}
 
 static void install_faults(void) {
     struct d_sigaction sa; sa.handler = (void *)fault_handler; sa.mask = 0; sa.flags = 0;
@@ -176,7 +182,15 @@ static void restore_faults(void) {
  * path that needs the com.apple.security.cs.allow-jit entitlement, which a free
  * sideload does not have, so it is attempted only as a best-effort fast path.
  */
-static const uint32_t JIT_CODE[2] = { 0x52800540u /* mov w0, #42 */, 0xD65F03C0u /* ret */ };
+/* `bti c` first: on ARMv8.5+ an indirect branch into a BTI-guarded page needs a
+   landing pad or the CPU raises SIGILL. On older cores it decodes as a NOP, so
+   it is free insurance. */
+static const uint32_t JIT_CODE[3] = {
+    0xD503245Fu /* bti c      */, 0x52800540u /* mov w0, #42 */, 0xD65F03C0u /* ret */
+};
+/* Bare landing-pad + return: executes no real work. If even THIS faults, the
+   page is simply not executable (permission), rather than the bytes being bad. */
+static const uint32_t RET_CODE[2] = { 0xD503245Fu /* bti c */, 0xD65F03C0u /* ret */ };
 
 /* Read this process's code-signing status. Returns 0 on success. */
 static int cs_flags(unsigned int *out) {
@@ -200,9 +214,11 @@ static void log_err(const char *what, int e) {
     char t[192]; snprintf(t, sizeof t, "%s errno=%d\n", what, e); log_add(t);
 }
 
-/* Execute the emitted code under a fault guard. 1 = ran and returned 42. */
+/* Execute the emitted code under a fault guard. 1 = ran and returned 42.
+   On failure g_lastsig holds the signal (0 = ran but returned the wrong value). */
 static int try_exec(void *mem) {
     sys_icache_invalidate(mem, sizeof JIT_CODE);
+    g_lastsig = 0;
     install_faults();
     volatile int r = -1;
     if (sigsetjmp(g_jbuf, 1) == 0) {
@@ -212,7 +228,28 @@ static int try_exec(void *mem) {
         return (r == 42);
     }
     restore_faults();
-    return 0;   /* faulted */
+    return 0;   /* faulted; see g_lastsig */
+}
+
+/* Can this page execute AT ALL? Runs only `bti c ; ret`, so a fault here means
+   the page has no execute permission, not that the emitted bytes were bad. */
+static int try_exec_bare(void *mem) {
+    sys_icache_invalidate(mem, sizeof RET_CODE);
+    g_lastsig = 0;
+    install_faults();
+    if (sigsetjmp(g_jbuf, 1) == 0) {
+        ((void (*)(void))mem)();
+        restore_faults();
+        return 1;
+    }
+    restore_faults();
+    return 0;
+}
+
+static void log_fault(const char *what) {
+    char t[192];
+    snprintf(t, sizeof t, "%s %s\n", what, g_lastsig ? signame(g_lastsig) : "wrong result");
+    log_add(t);
 }
 
 /*
@@ -253,7 +290,7 @@ static int jit_selftest(char *out, int n) {
             snprintf(out, n, "PASS \xE2\x80\x94 JIT ACTIVE\nExecuted emitted ARM64 code (returned 42).\nvia mmap(RW) \xE2\x86\x92 mprotect(R+X).\nThe Dynarmic recompiler substrate can run here.");
             return 1;
         } else {
-            log_add("A mprotect(R+X) OK but execute FAULTED\n");
+            log_fault("A mprotect(R+X) OK but execute FAULTED:");
         }
         munmap(m, len);
     }
@@ -269,7 +306,7 @@ static int jit_selftest(char *out, int n) {
             snprintf(out, n, "PASS \xE2\x80\x94 JIT ACTIVE\nExecuted emitted ARM64 code (returned 42).\nvia mmap(RWX).\nThe Dynarmic recompiler substrate can run here.");
             return 1;
         }
-        log_add("B mmap(RWX) OK but execute FAULTED\n");
+        log_fault("B mmap(RWX) OK but execute FAULTED:");
         munmap(m, len);
     }
 
@@ -288,13 +325,35 @@ static int jit_selftest(char *out, int n) {
             snprintf(out, n, "PASS \xE2\x80\x94 JIT ACTIVE\nExecuted emitted ARM64 code (returned 42).\nvia MAP_JIT.\nThe Dynarmic recompiler substrate can run here.");
             return 1;
         }
-        log_add(jit_wp ? "C MAP_JIT OK but execute FAULTED\n" : "C MAP_JIT ok, no write-protect fn\n");
+        log_fault(jit_wp ? "C MAP_JIT OK but execute FAULTED:" : "C MAP_JIT (no write-protect fn):");
         munmap(m, len);
     }
 
-    log_add(debugged
-        ? "\nProcess IS debugged but no route to executable memory worked."
-        : "\nDIAGNOSIS: this process is NOT debugged \xE2\x80\x94 StikDebug has not\nattached to it, so the kernel grants no JIT. Enable JIT in\nStikDebug while this app is running, then tap the button.");
+    /* --- D: can the page execute at all? (bti c ; ret only) -------------- */
+    int bare = 0;
+    m = mmap(nil, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (m != MAP_FAILED) {
+        memcpy(m, RET_CODE, sizeof RET_CODE);
+        if (mprotect(m, len, PROT_READ | PROT_EXEC) == 0) {
+            bare = try_exec_bare(m);
+            log_fault(bare ? "D bare ret: RAN \xE2\x80\x94 execution works;" : "D bare ret: FAULTED");
+        }
+        munmap(m, len);
+    }
+
+    if (!debugged) {
+        log_add("\nDIAGNOSIS: process is NOT debugged \xE2\x80\x94 StikDebug has not\n"
+                "attached, so the kernel grants no JIT. Enable JIT in StikDebug\n"
+                "while this app is running, then tap the button.");
+    } else if (bare) {
+        log_add("\nDIAGNOSIS: pages DO execute, but the emitted instruction\n"
+                "sequence did not. This is a code-generation problem, not a\n"
+                "permissions one.");
+    } else {
+        log_add("\nDIAGNOSIS: process IS debugged and the mappings are accepted,\n"
+                "but no page will execute. The kernel is refusing execute despite\n"
+                "CS_DEBUGGED \xE2\x80\x94 an OS-policy block, not an app bug.");
+    }
     return 0;
 }
 
