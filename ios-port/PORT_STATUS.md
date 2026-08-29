@@ -44,7 +44,7 @@ allocated while StikDebug is attached (task: patch oaknut/dynarmic).
 | **Dependency tree (all 28 libs)** | ✅ **COMPLETE — every Vita3K dependency cross-compiles for arm64-iOS** (staged in `/home/user/ios-deps`) |
 | Vita3K core static lib (`libVita3K`) | ⬜ next: make Vita3K's own CMake iOS-aware, then compile |
 | Headless "core boots" on device | ⬜ |
-| **iOS front-end (touch UI, game loading, controls)** | 🟡 **scaffold builds & runs**: `Vita3K.ipa` — Library/Settings/About tabs, .vpk/.pkg import, full on-screen Vita gamepad, Enable-JIT button, core-bridge with weak core hook. Emulator core not yet wired. |
+| **iOS front-end (touch UI, game loading, controls)** | 🟢 **builds & runs, feature-rich**: `Vita3K.ipa` — Library (real param.sfo titles, real VPK extraction), Game Detail (metadata, save data, play/delete), Settings, About, First-Run onboarding (JIT guide), Firmware install, Controller mapping (GameController), full on-screen Vita gamepad, Enable-JIT. 12 source files. Emulator core wires in behind the `Vita3KCore` bridge. |
 
 ## Reproduce
 

@@ -6,6 +6,7 @@
 #import "GameLibraryViewController.h"
 #import "SettingsViewController.h"
 #import "AboutViewController.h"
+#import "FirstRunSetupViewController.h"
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property (strong, nonatomic) UIWindow *window;
@@ -48,6 +49,15 @@
     self.window.rootViewController = tabs;
     self.window.backgroundColor = V3KBackground();
     [self.window makeKeyAndVisible];
+
+    // First launch: show the setup/onboarding (JIT + firmware + games guide).
+    if (![NSUserDefaults.standardUserDefaults boolForKey:@"v3k.setupDone"]) {
+        FirstRunSetupViewController *setup = [FirstRunSetupViewController new];
+        setup.modalPresentationStyle = UIModalPresentationFullScreen;
+        __weak UITabBarController *wtabs = tabs;
+        setup.onFinish = ^{ [wtabs dismissViewControllerAnimated:YES completion:nil]; };
+        dispatch_async(dispatch_get_main_queue(), ^{ [tabs presentViewController:setup animated:NO completion:nil]; });
+    }
     return YES;
 }
 

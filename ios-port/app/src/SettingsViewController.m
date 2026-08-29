@@ -3,6 +3,8 @@
 #import "SettingsViewController.h"
 #import "Theme.h"
 #import "Vita3KCore.h"
+#import "FirmwareInstallViewController.h"
+#import "ControllerMappingViewController.h"
 
 static NSString *const kPrefix = @"v3k.";
 
@@ -201,6 +203,18 @@ typedef NS_ENUM(NSInteger, V3KRowKind) {
         ctl.rows = @[opacity, haptics];
     }
     [out addObject:ctl];
+
+    // ---- SETUP & DEVICES ----
+    V3KSettingSection *devs = [V3KSettingSection new];
+    devs.title = @"Setup & Devices";
+    {
+        V3KSettingRow *fw = [V3KSettingRow row:V3KRowDisclosure title:@"Firmware"];
+        fw.symbol = @"arrow.down.doc.fill";
+        V3KSettingRow *ctrl = [V3KSettingRow row:V3KRowDisclosure title:@"Controllers"];
+        ctrl.symbol = @"gamecontroller.fill";
+        devs.rows = @[fw, ctrl];
+    }
+    [out addObject:devs];
 
     // ---- STORAGE ----
     V3KSettingSection *store = [V3KSettingSection new];
@@ -501,7 +515,15 @@ static NSInteger V3KTagFor(NSInteger section, NSInteger row) {
     if (row.kind == V3KRowChoice) {
         [self presentChoiceForRow:row atIndexPath:indexPath];
     } else if (row.kind == V3KRowDisclosure) {
-        V3KManageDataViewController *vc = [V3KManageDataViewController new];
+        UIViewController *vc;
+        if ([row.title isEqualToString:@"Firmware"]) {
+            vc = [FirmwareInstallViewController new];
+        } else if ([row.title isEqualToString:@"Controllers"]) {
+            vc = [ControllerMappingViewController new];
+        } else {
+            V3KManageDataViewController *m = [V3KManageDataViewController new];
+            vc = m;
+        }
         vc.title = row.title;
         if (self.navigationController) {
             [self.navigationController pushViewController:vc animated:YES];

@@ -13,6 +13,7 @@
 #import "Theme.h"
 #import "Vita3KCore.h"
 #import "EmulatorViewController.h"
+#import "GameDetailViewController.h"
 
 #pragma mark - V3KGameCell
 
@@ -367,9 +368,14 @@ static NSString *const kCellId = @"V3KGameCell";
 }
 
 - (void)launchTitle:(V3KTitle *)title {
-    EmulatorViewController *evc = [[EmulatorViewController alloc] initWithTitleId:title.titleId];
-    evc.modalPresentationStyle = UIModalPresentationFullScreen;
-    [self presentViewController:evc animated:YES completion:nil];
+    GameDetailViewController *detail = [[GameDetailViewController alloc] initWithTitle:title];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:detail animated:YES];
+    } else {
+        EmulatorViewController *evc = [[EmulatorViewController alloc] initWithTitleId:title.titleId];
+        evc.modalPresentationStyle = UIModalPresentationFullScreen;
+        [self presentViewController:evc animated:YES completion:nil];
+    }
 }
 
 - (void)presentErrorWithTitle:(NSString *)title error:(NSError *)error {
