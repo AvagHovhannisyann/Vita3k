@@ -32,7 +32,8 @@ allocated while StikDebug is attached (task: patch oaknut/dynarmic).
 | FFmpeg / OpenSSL / boost::filesystem / curl (arm64-ios) | ⬜ |
 | SDL3 (iOS/UIKit) | ⬜ (upstream supports iOS) |
 | MoltenVK (Vulkan→Metal) | ✅ prebuilt ios-arm64 available (34 MB) |
-| SPIRV-Cross / glslang / SPIR-V shaders | ⬜ (shaders reusable from APK) |
+| **SPIRV-Cross (shader translation, incl. MSL→Metal backend)** | ✅ **cross-compiles to 8 arm64 Mach-O libs (core/glsl/hlsl/msl/cpp/reflect/util/c)** |
+| glslang / SPIR-V builtin shaders | ⬜ (shaders reusable verbatim from APK) |
 | Vita3K core static lib | ⬜ |
 | Headless "core boots" on device | ⬜ |
 | iOS front-end (touch UI, game loading, controls) | ⬜ (~40k lines; neither Qt nor Kotlin UI reusable) |
@@ -42,6 +43,20 @@ allocated while StikDebug is attached (task: patch oaknut/dynarmic).
 ```bash
 ios-port/build-dynarmic.sh     # builds libdynarmic.a for arm64-ios
 ```
+
+Other deps use the same toolchain, e.g. SPIRV-Cross:
+```bash
+git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Cross
+cmake -S SPIRV-Cross -B build -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=$PWD/ios-port/toolchain/ios-arm64.cmake \
+  -DSPIRV_CROSS_ENABLE_TESTS=OFF -DSPIRV_CROSS_CLI=OFF
+PATH=/home/user/iosbin:$PATH ninja -C build   # -> libspirv-cross-*.a (arm64 Mach-O)
+```
+
+Two of the three hard core stacks — CPU/JIT (dynarmic) and graphics-shader
+translation (SPIRV-Cross, incl. the Metal/MSL backend) — now build for iOS.
+The third hard part (the front-end) is UI engineering, not a build-feasibility
+question.
 
 ## Honest assessment
 
