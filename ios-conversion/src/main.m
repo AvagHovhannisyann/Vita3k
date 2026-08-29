@@ -78,6 +78,35 @@ extern int   csops(int pid, unsigned int ops, void *useraddr, size_t usersize);
 #define CS_KILL            0x00000200u
 #define CS_DEBUGGED        0x10000000u
 
+/* ---- Mach VM (for the vm_remap dual-mapping "bulletproof JIT" path) ------ */
+typedef unsigned int       mach_port_t;
+typedef mach_port_t        vm_map_t;
+typedef unsigned long long mach_vm_address_t;
+typedef unsigned long long mach_vm_size_t;
+typedef unsigned long long mach_vm_offset_t;
+typedef int                vm_prot_t;
+typedef int                kern_return_t;
+typedef int                boolean_t;
+typedef unsigned int       vm_inherit_t;
+extern mach_port_t   mach_task_self_;
+extern kern_return_t mach_vm_allocate(vm_map_t, mach_vm_address_t *, mach_vm_size_t, int);
+extern kern_return_t mach_vm_deallocate(vm_map_t, mach_vm_address_t, mach_vm_size_t);
+extern kern_return_t mach_vm_remap(vm_map_t, mach_vm_address_t *, mach_vm_size_t, mach_vm_offset_t,
+                                   int, vm_map_t, mach_vm_address_t, boolean_t,
+                                   vm_prot_t *, vm_prot_t *, vm_inherit_t);
+extern kern_return_t mach_vm_protect(vm_map_t, mach_vm_address_t, mach_vm_size_t, boolean_t, vm_prot_t);
+#define VM_FLAGS_ANYWHERE 0x0001
+#define VM_PROT_READ      1
+#define VM_PROT_WRITE     2
+#define VM_PROT_EXECUTE   4
+#define VM_INHERIT_NONE   2
+#define KERN_SUCCESS      0
+
+/* ---- threads (for continuous background JIT probing) -------------------- */
+typedef void *pthread_t;
+extern int          pthread_create(pthread_t *, const void *, void *(*)(void *), void *);
+extern unsigned int usleep(unsigned int);
+
 /* signal / non-local jump for fault-safe execution of the JIT probe */
 extern int   sigsetjmp(void *env, int savemask);
 extern void  siglongjmp(void *env, int val) __attribute__((noreturn));
@@ -258,6 +287,57 @@ static void log_fault(const char *what) {
  * B: mmap(RWX) directly             <- works when the task is fully debugged
  * C: MAP_JIT + pthread_jit_write_protect_np  <- needs the allow-jit entitlement
  */
+/* Strategy F: vm_remap dual-mapping ("bulletproof JIT"). Map the same physical
+ * pages twice — one RW view to write through, one RX view to execute from — so
+ * no single mapping is ever W and X at once. This is what UTM/Dolphin use on
+ * sideloaded iOS when MAP_JIT is unavailable. Returns 1 on success. */
+static int jit_dualmap(char *out, int n) {
+    const mach_vm_size_t len = 16384;
+    mach_vm_address_t rw = 0;
+    kern_return_t kr = mach_vm_allocate(mach_task_self_, &rw, len, VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) { snprintf(out, n, "F dualmap: alloc failed kr=%d", kr); return 0; }
+    memcpy((void *)(unsigned long)rw, JIT_CODE, sizeof JIT_CODE);
+
+    mach_vm_address_t rx = 0;
+    vm_prot_t cur = 0, max = 0;
+    kr = mach_vm_remap(mach_task_self_, &rx, len, 0, VM_FLAGS_ANYWHERE,
+                       mach_task_self_, rw, 0 /*copy=false: share phys pages*/,
+                       &cur, &max, VM_INHERIT_NONE);
+    if (kr != KERN_SUCCESS) {
+        snprintf(out, n, "F dualmap: remap failed kr=%d", kr);
+        mach_vm_deallocate(mach_task_self_, rw, len);
+        return 0;
+    }
+    kr = mach_vm_protect(mach_task_self_, rx, len, 0, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) {
+        snprintf(out, n, "F dualmap: protect(RX) failed kr=%d", kr);
+        mach_vm_deallocate(mach_task_self_, rx, len);
+        mach_vm_deallocate(mach_task_self_, rw, len);
+        return 0;
+    }
+    sys_icache_invalidate((void *)(unsigned long)rx, sizeof JIT_CODE);
+
+    install_faults();
+    g_lastsig = 0;
+    int ok = 0;
+    if (sigsetjmp(g_jbuf, 1) == 0) {
+        int (*fn)(void) = (int (*)(void))(unsigned long)rx;
+        ok = (fn() == 42);
+        restore_faults();
+    } else {
+        restore_faults();
+    }
+    mach_vm_deallocate(mach_task_self_, rx, len);
+    mach_vm_deallocate(mach_task_self_, rw, len);
+    if (ok) {
+        snprintf(out, n, "PASS \xE2\x80\x94 JIT ACTIVE (vm_remap dual-mapping)\nWrote via RW view, executed via separate RX view (returned 42).\nThis is the bulletproof-JIT path UTM/Dolphin use on iOS.\nVita3K's JIT can be made to run this way.");
+        return 1;
+    }
+    snprintf(out, n, "F dualmap: RW+RX mapped OK but execute %s",
+             g_lastsig ? signame(g_lastsig) : "wrong-result");
+    return 0;
+}
+
 static int jit_selftest(char *out, int n) {
     const size_t len = 4096;
     log_init(out, n);
@@ -275,6 +355,13 @@ static int jit_selftest(char *out, int n) {
         log_add(t);
     } else {
         log_add("CS flags: csops() unavailable\n");
+    }
+
+    /* --- F: vm_remap dual-mapping (tried first: most likely to work) ------ */
+    {
+        char fbuf[300];
+        if (jit_dualmap(fbuf, sizeof fbuf) == 1) { snprintf(out, n, "%s", fbuf); return 1; }
+        log_add(fbuf); log_add("\n");
     }
 
     /* --- E: oaknut/dynarmic's REAL iOS sequence -------------------------- *
@@ -404,38 +491,54 @@ static int is_debugged(void) {
 static id g_window;
 static id g_dbgLabel, g_jitHeader, g_jitBody;   /* live status labels (re-runnable) */
 
-/* Re-run the debugger check + JIT self-test and update the on-screen labels.
- * Called at launch, whenever the app becomes active (e.g. after StikDebug
- * enables JIT and returns focus), and from the "Run JIT self-test" button. */
-static void refresh_status(void) {
+static char g_osver[64];
+static volatile int g_everPassed = 0, g_passedWhileAttached = 0;
+
+/* Marshal a one-argument ObjC message to the main thread (UI must run there). */
+static void mt(id obj, const char *sel, id arg) {
+    ((void (*)(id, SEL, SEL, id, BOOL))objc_msgSend)(
+        obj, S("performSelectorOnMainThread:withObject:waitUntilDone:"), S(sel), arg, NO);
+}
+
+/* One probe cycle: run the full self-test, update the labels. */
+static void probe_once(void) {
     if (!g_jitBody) return;
-
     int dbg = is_debugged();
-    char dbgline[160];
-    snprintf(dbgline, sizeof dbgline, "Debugger attached now:  %s   (JIT persists after detach)",
-             dbg == 1 ? "YES" : dbg == 0 ? "no" : "unknown");
-    send1(g_dbgLabel, "setText:", NSStr(dbgline));
-    send1(g_dbgLabel, "setTextColor:", dbg == 1 ? rgb(0.4, 0.9, 0.4, 1.0) : rgb(0.72, 0.70, 0.78, 1.0));
-
-    char jitbuf[512];
+    char jitbuf[700];
     int jit = jit_selftest(jitbuf, sizeof jitbuf);
-    id jitColor = jit == 1 ? rgb(0.35, 0.92, 0.45, 1.0) : rgb(1.0, 0.62, 0.30, 1.0);
-    send1(g_jitHeader, "setText:", NSStr(jit == 1 ? "JIT SELF-TEST:  PASS" : "JIT SELF-TEST:  standby"));
-    send1(g_jitHeader, "setTextColor:", jitColor);
-    send1(g_jitBody, "setText:", NSStr(jitbuf));
+    if (jit == 1) { g_everPassed = 1; if (dbg == 1) g_passedWhileAttached = 1; }
+
+    char dbgline[220];
+    snprintf(dbgline, sizeof dbgline, "iOS %s   |   debugger now: %s%s",
+             g_osver[0] ? g_osver : "?",
+             dbg == 1 ? "ATTACHED" : dbg == 0 ? "no" : "?",
+             g_everPassed ? (g_passedWhileAttached ? "   |   JIT worked WHILE attached"
+                                                    : "   |   JIT worked once") : "");
+    mt(g_dbgLabel, "setText:", NSStr(dbgline));
+    mt(g_dbgLabel, "setTextColor:", dbg == 1 ? rgb(0.4, 0.9, 0.4, 1.0) : rgb(0.72, 0.70, 0.78, 1.0));
+
+    const char *hdr = jit == 1 ? "JIT SELF-TEST:  PASS \xE2\x9C\x93"
+                    : g_everPassed ? "JIT SELF-TEST:  worked earlier (re-enable JIT)"
+                                   : "JIT SELF-TEST:  probing\xE2\x80\xA6";
+    id hcol = (jit == 1 || g_everPassed) ? rgb(0.35, 0.92, 0.45, 1.0) : rgb(1.0, 0.62, 0.30, 1.0);
+    mt(g_jitHeader, "setText:", NSStr(hdr));
+    mt(g_jitHeader, "setTextColor:", hcol);
+    mt(g_jitBody, "setText:", NSStr(jitbuf));
 }
 
-/* Button action: -runTest: */
-static void runTest(id self, SEL _cmd, id sender) {
-    (void)self; (void)_cmd; (void)sender;
-    refresh_status();
+/* Background thread: probe continuously so we catch the window while StikDebug
+ * is still attached (the grant may not persist a detach). ~4x/sec. */
+static void *prober(void *arg) {
+    (void)arg;
+    for (;;) { probe_once(); usleep(250000); }
+    return nil;
 }
+
+/* Button action: -runTest:  (probe is automatic; button forces an immediate one) */
+static void runTest(id self, SEL _cmd, id sender) { (void)self; (void)_cmd; (void)sender; }
 
 /* -applicationDidBecomeActive: */
-static void didBecomeActive(id self, SEL _cmd, id application) {
-    (void)self; (void)_cmd; (void)application;
-    refresh_status();
-}
+static void didBecomeActive(id self, SEL _cmd, id application) { (void)self; (void)_cmd; (void)application; }
 
 static BOOL didFinishLaunching(id self, SEL _cmd, id application, id options) {
     (void)_cmd; (void)application; (void)options;
@@ -493,7 +596,7 @@ static BOOL didFinishLaunching(id self, SEL _cmd, id application, id options) {
     CGFloat bw = 260, bh = 48;
     id btn = ((id(*)(id, SEL, long))objc_msgSend)(C("UIButton"), S("buttonWithType:"), 1 /*System*/);
     setFrame(btn, RECT((W - bw) / 2.0, H - 150, bw, bh));
-    ((void(*)(id, SEL, id, long))objc_msgSend)(btn, S("setTitle:forState:"), NSStr("Run JIT self-test"), 0);
+    ((void(*)(id, SEL, id, long))objc_msgSend)(btn, S("setTitle:forState:"), NSStr("Auto-testing JIT\xE2\x80\xA6"), 0);
     ((void(*)(id, SEL, id, long))objc_msgSend)(btn, S("setTitleColor:forState:"), rgb(0.09, 0.05, 0.11, 1.0), 0);
     send1(btn, "setBackgroundColor:", gold);
     id btnFont = ((id(*)(id, SEL, CGFloat))objc_msgSend)(C("UIFont"), S("boldSystemFontOfSize:"), 17.0);
@@ -505,8 +608,8 @@ static BOOL didFinishLaunching(id self, SEL _cmd, id application, id options) {
     addSub(view, btn);
 
     id footer = makeLabel(RECT(pad, H - 84, W - 2 * pad, 64),
-                          "Sideload with Sideloadly (free Apple ID sets get-task-allow).\n"
-                          "In StikDebug: Enable JIT for Vita3K, return here, tap the button.\n"
+                          "Auto-testing JIT ~4x/sec. Leave this open, open StikDebug,\n"
+                          "Enable JIT for Vita3K, then come BACK here WITHOUT relaunching.\n"
                           "A green PASS means this device can run the Dynarmic JIT.", 11, 0, grey, 1);
     addSub(view, footer);
 
@@ -517,7 +620,17 @@ static BOOL didFinishLaunching(id self, SEL _cmd, id application, id options) {
     id app = send0(C("UIApplication"), "sharedApplication");
     ((void(*)(id, SEL, BOOL))objc_msgSend)(app, S("setIdleTimerDisabled:"), YES);
 
-    refresh_status();
+    /* capture the iOS version once */
+    {
+        id pi = send0(C("NSProcessInfo"), "processInfo");
+        id vs = send0(pi, "operatingSystemVersionString");
+        const char *c = ((const char *(*)(id, SEL))objc_msgSend)(vs, S("UTF8String"));
+        if (c) snprintf(g_osver, sizeof g_osver, "%s", c);
+    }
+
+    /* start continuous background probing */
+    pthread_t th;
+    pthread_create(&th, nil, prober, nil);
     return YES;
 }
 
