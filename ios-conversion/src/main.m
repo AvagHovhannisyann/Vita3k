@@ -123,10 +123,28 @@ extern int   sigaction(int sig, const struct d_sigaction *act, struct d_sigactio
 #define MAP_JIT     0x0800
 #define MAP_FAILED  ((void *)-1)
 
+#define SIGTRAP  5
 #define SIGILL   4
 #define SIGBUS  10
 #define SIGSEGV 11
 #define P_TRACED 0x00000800
+
+/* ---- mutex (serialize the two probe sites so signal handlers don't race) - */
+extern int pthread_mutex_init(void *, const void *);
+extern int pthread_mutex_lock(void *);
+extern int pthread_mutex_unlock(void *);
+
+/* ---- iOS 26 / TXM JIT protocol (StikJIT "JIT26" brk #0xf00d handshake) ----
+ * On A15+/TXM devices CS_DEBUGGED is not enough: each executable region must be
+ * prepared by StikDebug's attached debugger. The app signals the debugger with
+ * a breakpoint. x16 selects the op; args are in x0/x1; result returns in x0.
+ * A brk with no script attached raises SIGTRAP (we guard for it). */
+__attribute__((noinline, naked)) static void *JIT26PrepareRegion(void *address, unsigned long length) {
+    __asm__ volatile("mov x16, #1\n\t brk #0xf00d\n\t ret\n\t");
+}
+__attribute__((noinline, naked)) static void JIT26Detach(void) {
+    __asm__ volatile("mov x16, #0\n\t brk #0xf00d\n\t ret\n\t");
+}
 
 /* ---- CoreGraphics geometry (arm64: CGFloat == double) ------------------- */
 typedef double CGFloat;
@@ -175,14 +193,15 @@ static id makeLabel(CGRect frame, const char *text, CGFloat font, int bold, id c
 /*  requirement.  Emits `mov w0, #42 ; ret` and executes it.                  */
 /* ========================================================================= */
 static long g_jbuf[256] __attribute__((aligned(16)));      /* oversized sigjmp_buf   */
-static struct d_sigaction g_old_bus, g_old_segv, g_old_ill;
+static struct d_sigaction g_old_bus, g_old_segv, g_old_ill, g_old_trap;
 
 static volatile int g_lastsig;          /* signal that aborted the last probe */
 
 static void fault_handler(int sig) { g_lastsig = sig; siglongjmp(g_jbuf, 1); }
 
 static const char *signame(int s) {
-    return s == SIGILL ? "SIGILL" : s == SIGBUS ? "SIGBUS" : s == SIGSEGV ? "SIGSEGV" : "fault";
+    return s == SIGILL ? "SIGILL" : s == SIGBUS ? "SIGBUS" : s == SIGSEGV ? "SIGSEGV"
+         : s == SIGTRAP ? "SIGTRAP" : "fault";
 }
 
 static void install_faults(void) {
@@ -190,11 +209,13 @@ static void install_faults(void) {
     sigaction(SIGBUS,  &sa, &g_old_bus);
     sigaction(SIGSEGV, &sa, &g_old_segv);
     sigaction(SIGILL,  &sa, &g_old_ill);
+    sigaction(SIGTRAP, &sa, &g_old_trap);
 }
 static void restore_faults(void) {
     sigaction(SIGBUS,  &g_old_bus,  (struct d_sigaction *)0);
     sigaction(SIGSEGV, &g_old_segv, (struct d_sigaction *)0);
     sigaction(SIGILL,  &g_old_ill,  (struct d_sigaction *)0);
+    sigaction(SIGTRAP, &g_old_trap, (struct d_sigaction *)0);
 }
 
 /*
@@ -485,10 +506,91 @@ static int is_debugged(void) {
     return (p_flag & P_TRACED) ? 1 : 0;
 }
 
+/* The iOS 26 / TXM path: ask StikDebug's attached debugger to prepare an RX
+ * region (brk handshake), make a writable alias of it, detach, then write code
+ * via the RW alias and execute via the RX region. Returns 1 on success. */
+static int jit_test_jit26(char *out, int n) {
+    unsigned int cs = 0;
+    if (cs_flags(&cs) != 0 || !(cs & CS_DEBUGGED)) {
+        snprintf(out, n, "iOS 26 JIT: process is NOT debugged yet.\n"
+                 "In StikDebug, Enable JIT for Vita3K while it is running,\n"
+                 "then come back and tap this button (do not relaunch).");
+        return 0;
+    }
+    const unsigned long len = 16384;
+
+    /* 1) ask the debugger to prepare an RX region (NULL -> it allocates). */
+    install_faults();
+    g_lastsig = 0;
+    void *rx = (void *)0;
+    if (sigsetjmp(g_jbuf, 1) == 0) {
+        rx = JIT26PrepareRegion((void *)0, len);
+        restore_faults();
+    } else {
+        restore_faults();
+        snprintf(out, n, "iOS 26 JIT: the brk handshake was not answered (%s).\n"
+                 "Your StikDebug build may not implement the iOS 26 JIT protocol,\n"
+                 "or JIT was not actually enabled for THIS running process.\n"
+                 "Update StikDebug, Enable JIT for Vita3K, then retry.", signame(g_lastsig));
+        return 0;
+    }
+    if (rx == (void *)0 || rx == (void *)-1) {
+        snprintf(out, n, "iOS 26 JIT: PrepareRegion returned null (debugger declined).");
+        return 0;
+    }
+
+    /* 2) make a writable alias of the same physical pages. */
+    mach_vm_address_t rw = 0; vm_prot_t cur = 0, max = 0;
+    kern_return_t kr = mach_vm_remap(mach_task_self_, &rw, len, 0, VM_FLAGS_ANYWHERE,
+                                     mach_task_self_, (mach_vm_address_t)(unsigned long)rx,
+                                     0, &cur, &max, VM_INHERIT_NONE);
+    if (kr != KERN_SUCCESS) {
+        snprintf(out, n, "iOS 26 JIT: RX@%lx prepared, but RW-alias remap failed kr=%d",
+                 (unsigned long)rx, kr);
+        return 0;
+    }
+    mach_vm_protect(mach_task_self_, rw, len, 0, VM_PROT_READ | VM_PROT_WRITE);
+
+    /* 3) detach the handshake (per protocol), then write + execute at runtime. */
+    install_faults();
+    if (sigsetjmp(g_jbuf, 1) == 0) { JIT26Detach(); restore_faults(); }
+    else { restore_faults(); }
+
+    memcpy((void *)(unsigned long)rw, JIT_CODE, sizeof JIT_CODE);
+    sys_icache_invalidate(rx, sizeof JIT_CODE);
+
+    install_faults();
+    g_lastsig = 0;
+    int ok = 0;
+    if (sigsetjmp(g_jbuf, 1) == 0) {
+        int (*fn)(void) = (int (*)(void))rx;
+        ok = (fn() == 42);
+        restore_faults();
+    } else {
+        restore_faults();
+    }
+    mach_vm_deallocate(mach_task_self_, rw, len);
+
+    if (ok) {
+        snprintf(out, n, "PASS \xE2\x80\x94 JIT ACTIVE via the iOS 26 protocol!\n"
+                 "StikDebug prepared RX@%lx; wrote via RW alias; executed (returned 42).\n"
+                 "Vita3K's Dynarmic recompiler CAN run on this device this way.",
+                 (unsigned long)rx);
+        return 1;
+    }
+    snprintf(out, n, "iOS 26 JIT: region prepared + written, but execute %s.\n"
+             "iOS 26 may have revoked execute on the idle page, or the debugger\n"
+             "must stay attached. Keep StikDebug attached and retry.",
+             g_lastsig ? signame(g_lastsig) : "returned wrong value");
+    return 0;
+}
+
 /* ========================================================================= */
 /*  UI                                                                       */
 /* ========================================================================= */
 static id g_window;
+static id g_jit26Label;
+static long g_mtx[8] __attribute__((aligned(16)));   /* pthread_mutex_t storage */
 static id g_dbgLabel, g_jitHeader, g_jitBody;   /* live status labels (re-runnable) */
 
 static char g_osver[64];
@@ -505,7 +607,9 @@ static void probe_once(void) {
     if (!g_jitBody) return;
     int dbg = is_debugged();
     char jitbuf[700];
+    pthread_mutex_lock(g_mtx);
     int jit = jit_selftest(jitbuf, sizeof jitbuf);
+    pthread_mutex_unlock(g_mtx);
     if (jit == 1) { g_everPassed = 1; if (dbg == 1) g_passedWhileAttached = 1; }
 
     char dbgline[220];
@@ -534,8 +638,20 @@ static void *prober(void *arg) {
     return nil;
 }
 
-/* Button action: -runTest:  (probe is automatic; button forces an immediate one) */
-static void runTest(id self, SEL _cmd, id sender) { (void)self; (void)_cmd; (void)sender; }
+/* Button action: -runTest:  runs the iOS 26 JIT26 brk-handshake test on demand.
+ * Serialized against the background prober so the signal handlers don't race. */
+static void runTest(id self, SEL _cmd, id sender) {
+    (void)self; (void)_cmd; (void)sender;
+    if (!g_jit26Label) return;
+    send1(g_jit26Label, "setText:", NSStr("iOS 26 JIT: running handshake\xE2\x80\xA6"));
+    char buf[600];
+    pthread_mutex_lock(g_mtx);
+    int r = jit_test_jit26(buf, sizeof buf);
+    pthread_mutex_unlock(g_mtx);
+    if (r == 1) { g_everPassed = 1; g_passedWhileAttached = 1; }
+    send1(g_jit26Label, "setText:", NSStr(buf));
+    send1(g_jit26Label, "setTextColor:", r == 1 ? rgb(0.35, 0.92, 0.45, 1.0) : rgb(1.0, 0.72, 0.30, 1.0));
+}
 
 /* -applicationDidBecomeActive: */
 static void didBecomeActive(id self, SEL _cmd, id application) { (void)self; (void)_cmd; (void)application; }
@@ -592,11 +708,15 @@ static BOOL didFinishLaunching(id self, SEL _cmd, id application, id options) {
     g_jitBody = makeLabel(RECT(pad, y, W - 2 * pad, 140), " ", 13.0, 0, white, 1);
     addSub(view, g_jitBody);
 
-    /* "Run JIT self-test" button — tap AFTER enabling JIT in StikDebug */
-    CGFloat bw = 260, bh = 48;
+    /* JIT26 result label (filled by the button handler) */
+    g_jit26Label = makeLabel(RECT(pad, H - 210, W - 2 * pad, 60), " ", 12.5, 0, grey, 1);
+    addSub(view, g_jit26Label);
+
+    /* "Enable JIT (iOS 26)" button — tap AFTER enabling JIT in StikDebug */
+    CGFloat bw = 300, bh = 52;
     id btn = ((id(*)(id, SEL, long))objc_msgSend)(C("UIButton"), S("buttonWithType:"), 1 /*System*/);
-    setFrame(btn, RECT((W - bw) / 2.0, H - 150, bw, bh));
-    ((void(*)(id, SEL, id, long))objc_msgSend)(btn, S("setTitle:forState:"), NSStr("Auto-testing JIT\xE2\x80\xA6"), 0);
+    setFrame(btn, RECT((W - bw) / 2.0, H - 140, bw, bh));
+    ((void(*)(id, SEL, id, long))objc_msgSend)(btn, S("setTitle:forState:"), NSStr("Enable JIT (iOS 26 protocol)"), 0);
     ((void(*)(id, SEL, id, long))objc_msgSend)(btn, S("setTitleColor:forState:"), rgb(0.09, 0.05, 0.11, 1.0), 0);
     send1(btn, "setBackgroundColor:", gold);
     id btnFont = ((id(*)(id, SEL, CGFloat))objc_msgSend)(C("UIFont"), S("boldSystemFontOfSize:"), 17.0);
@@ -607,10 +727,10 @@ static BOOL didFinishLaunching(id self, SEL _cmd, id application, id options) {
         self, S("runTest:"), 1 << 6 /*UIControlEventTouchUpInside*/);
     addSub(view, btn);
 
-    id footer = makeLabel(RECT(pad, H - 84, W - 2 * pad, 64),
-                          "Auto-testing JIT ~4x/sec. Leave this open, open StikDebug,\n"
-                          "Enable JIT for Vita3K, then come BACK here WITHOUT relaunching.\n"
-                          "A green PASS means this device can run the Dynarmic JIT.", 11, 0, grey, 1);
+    id footer = makeLabel(RECT(pad, H - 78, W - 2 * pad, 60),
+                          "Top lines auto-test the old JIT paths (expected to fail on iOS 18.4+).\n"
+                          "For iOS 26: Enable JIT in StikDebug (keep it running), return here,\n"
+                          "then tap the gold button. A green PASS proves Vita3K's JIT can run.", 10.5, 0, grey, 1);
     addSub(view, footer);
 
     ((void(*)(id, SEL, id))objc_msgSend)(g_window, S("setRootViewController:"), vc);
@@ -629,6 +749,7 @@ static BOOL didFinishLaunching(id self, SEL _cmd, id application, id options) {
     }
 
     /* start continuous background probing */
+    pthread_mutex_init(g_mtx, nil);
     pthread_t th;
     pthread_create(&th, nil, prober, nil);
     return YES;
