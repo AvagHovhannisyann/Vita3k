@@ -49,6 +49,16 @@ typedef NS_ENUM(NSInteger, V3KJITState) {
 /// (returns NO, fills error). Never crashes.
 - (BOOL)prepareJITWithError:(NSError **_Nullable)error;
 
+/// YES if the process is currently marked debugged (csops CS_DEBUGGED).
+@property (nonatomic, readonly) BOOL processIsDebugged;
+/// Decoded code-signing flags, e.g. "0x32003005 [valid get-task-allow enforcement
+/// require-LV dyld-platform DEBUGGED signed]".
+- (NSString *)codeSigningFlagsDescription;
+/// Run EVERY known route to executable memory and return a full multi-line
+/// report (which strategy worked, or how each failed, with signal names).
+/// Never crashes: all probes are fault-guarded. Safe to call repeatedly.
+- (NSString *)jitDiagnosticsReport;
+
 // --- Titles ---
 /// Scan ux0:/app for installed titles.
 - (NSArray<V3KTitle *> *)installedTitles;

@@ -5,6 +5,7 @@
 #import "Vita3KCore.h"
 #import "FirmwareInstallViewController.h"
 #import "ControllerMappingViewController.h"
+#import "JitDiagnosticsViewController.h"
 
 static NSString *const kPrefix = @"v3k.";
 
@@ -212,7 +213,9 @@ typedef NS_ENUM(NSInteger, V3KRowKind) {
         fw.symbol = @"arrow.down.doc.fill";
         V3KSettingRow *ctrl = [V3KSettingRow row:V3KRowDisclosure title:@"Controllers"];
         ctrl.symbol = @"gamecontroller.fill";
-        devs.rows = @[fw, ctrl];
+        V3KSettingRow *jit = [V3KSettingRow row:V3KRowDisclosure title:@"JIT Diagnostics"];
+        jit.symbol = @"bolt.fill";
+        devs.rows = @[jit, fw, ctrl];
     }
     [out addObject:devs];
 
@@ -516,7 +519,9 @@ static NSInteger V3KTagFor(NSInteger section, NSInteger row) {
         [self presentChoiceForRow:row atIndexPath:indexPath];
     } else if (row.kind == V3KRowDisclosure) {
         UIViewController *vc;
-        if ([row.title isEqualToString:@"Firmware"]) {
+        if ([row.title isEqualToString:@"JIT Diagnostics"]) {
+            vc = [JitDiagnosticsViewController new];
+        } else if ([row.title isEqualToString:@"Firmware"]) {
             vc = [FirmwareInstallViewController new];
         } else if ([row.title isEqualToString:@"Controllers"]) {
             vc = [ControllerMappingViewController new];

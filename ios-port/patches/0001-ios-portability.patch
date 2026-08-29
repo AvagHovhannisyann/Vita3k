@@ -1,0 +1,287 @@
+diff --git a/vita3k/config/src/settings.cpp b/vita3k/config/src/settings.cpp
+index c79877b..038c013 100644
+--- a/vita3k/config/src/settings.cpp
++++ b/vita3k/config/src/settings.cpp
+@@ -20,6 +20,7 @@
+ #include <config/functions.h>
+ 
+ #include <util/log.h>
++#include <util/ranges_compat.h>
+ #include <util/vector_utils.h>
+ 
+ #include <pugixml.hpp>
+@@ -402,7 +403,7 @@ std::vector<std::pair<std::string, bool>> get_modules_list(
+         }
+ 
+         for (auto &m : modules)
+-            m.second = std::ranges::contains(lle_modules, m.first);
++            m.second = VITA3K_RANGES_CONTAINS(lle_modules, m.first);
+ 
+         std::sort(modules.begin(), modules.end(), [](const auto &a, const auto &b) {
+             if (a.second == b.second)
+diff --git a/vita3k/io/include/io/functions.h b/vita3k/io/include/io/functions.h
+index 40b522c..2f039f0 100644
+--- a/vita3k/io/include/io/functions.h
++++ b/vita3k/io/include/io/functions.h
+@@ -17,10 +17,10 @@
+ 
+ #pragma once
+ 
+-#undef st_atime
+-#undef st_ctime
+-#undef st_mtime
+-
++// Note: previously this header unconditionally #undef'd st_atime/st_ctime/st_mtime here to
++// avoid a collision with io/types.h's SceIoStat fields on Apple platforms. That collision is
++// now handled locally (push_macro/pop_macro) inside io/types.h itself, so the macros stay
++// available here for any real POSIX struct stat usage.
+ #include <io/VitaIoDevice.h>
+ #include <io/state.h>
+ #include <io/types.h>
+diff --git a/vita3k/io/include/io/types.h b/vita3k/io/include/io/types.h
+index 96718d6..88f8835 100644
+--- a/vita3k/io/include/io/types.h
++++ b/vita3k/io/include/io/types.h
+@@ -17,10 +17,6 @@
+ 
+ #pragma once
+ 
+-#undef st_atime
+-#undef st_ctime
+-#undef st_mtime
+-
+ #include <util/tracy.h>
+ #include <util/types.h>
+ 
+@@ -97,6 +93,23 @@ inline std::string to_debug_str<SceIoSeekMode>(const MemState &mem, SceIoSeekMod
+     return std::to_string(type);
+ }
+ 
++// On Apple platforms <sys/stat.h> defines st_atime/st_ctime/st_mtime as macros that expand
++// to the nanosecond-precision st_*timespec.tv_sec fields, which collides with the field names
++// below. Save+undefine the macros only for this struct's declaration (via push/pop_macro,
++// which clang/gcc both support) instead of undefining them for the rest of the translation
++// unit -- a blanket #undef here previously broke unrelated code later in the same TU that
++// legitimately uses the real POSIX struct stat's st_atime/st_ctime/st_mtime macros (e.g.
++// io/src/io.cpp). <sys/stat.h> can be (re-)included by headers pulled in above (e.g. via
++// util/tracy.h), so do this right before the struct rather than assuming it's already gone.
++#if defined(__APPLE__)
++#pragma push_macro("st_atime")
++#pragma push_macro("st_ctime")
++#pragma push_macro("st_mtime")
++#undef st_atime
++#undef st_ctime
++#undef st_mtime
++#endif
++
+ struct SceIoStat {
+     SceMode st_mode; //!< One or more ::SceIoAccessMode
+     unsigned int st_attr; //!< One or more ::SceIoFileMode
+@@ -107,6 +120,12 @@ struct SceIoStat {
+     unsigned int st_private[6]; //!< Device-specific data
+ };
+ 
++#if defined(__APPLE__)
++#pragma pop_macro("st_mtime")
++#pragma pop_macro("st_ctime")
++#pragma pop_macro("st_atime")
++#endif
++
+ struct SceIoDirent {
+     SceIoStat d_stat;
+     char d_name[256];
+diff --git a/vita3k/io/include/io/util.h b/vita3k/io/include/io/util.h
+index e205277..7c6d70f 100644
+--- a/vita3k/io/include/io/util.h
++++ b/vita3k/io/include/io/util.h
+@@ -17,10 +17,10 @@
+ 
+ #pragma once
+ 
+-#undef st_atime
+-#undef st_ctime
+-#undef st_mtime
+-
++// Note: previously this header unconditionally #undef'd st_atime/st_ctime/st_mtime here to
++// avoid a collision with io/types.h's SceIoStat fields on Apple platforms. That collision is
++// now handled locally (push_macro/pop_macro) inside io/types.h itself, so the macros stay
++// available here for any real POSIX struct stat usage.
+ #include <io/types.h>
+ #include <util/fs.h>
+ 
+diff --git a/vita3k/module/src/load_module.cpp b/vita3k/module/src/load_module.cpp
+index b083fd3..ab22c9b 100644
+--- a/vita3k/module/src/load_module.cpp
++++ b/vita3k/module/src/load_module.cpp
+@@ -20,6 +20,7 @@
+ #include <config/state.h>
+ #include <emuenv/state.h>
+ #include <kernel/state.h>
++#include <util/ranges_compat.h>
+ #include <util/vector_utils.h>
+ 
+ static SysmodulePaths init_sysmodule_paths() {
+@@ -169,13 +170,13 @@ bool is_lle_module(SceSysmoduleModuleId module_id, EmuEnvState &emuenv) {
+ 
+     if (have_paths) {
+         if (emuenv.cfg.current_config.modules_mode != ModulesMode::MANUAL) {
+-            if (std::ranges::contains(auto_lle_modules, module_id))
++            if (VITA3K_RANGES_CONTAINS(auto_lle_modules, module_id))
+                 return true;
+         }
+ 
+         if (emuenv.cfg.current_config.modules_mode != ModulesMode::AUTOMATIC) {
+             for (auto path : paths) {
+-                if (std::ranges::contains(emuenv.cfg.current_config.lle_modules, path))
++                if (VITA3K_RANGES_CONTAINS(emuenv.cfg.current_config.lle_modules, path))
+                     return true;
+             }
+         }
+@@ -199,11 +200,11 @@ bool is_lle_module(const std::string &module_name, EmuEnvState &emuenv) {
+     if (auto_lle_module_names.empty())
+         auto_lle_module_names = init_auto_lle_module_names();
+     if (emuenv.cfg.current_config.modules_mode != ModulesMode::AUTOMATIC) {
+-        if (std::ranges::contains(emuenv.cfg.current_config.lle_modules, module_name))
++        if (VITA3K_RANGES_CONTAINS(emuenv.cfg.current_config.lle_modules, module_name))
+             return true;
+     }
+     if (emuenv.cfg.current_config.modules_mode != ModulesMode::MANUAL) {
+-        if (std::ranges::contains(auto_lle_module_names, module_name))
++        if (VITA3K_RANGES_CONTAINS(auto_lle_module_names, module_name))
+             return true;
+     }
+     return false;
+diff --git a/vita3k/modules/SceSysmodule/SceSysmodule.cpp b/vita3k/modules/SceSysmodule/SceSysmodule.cpp
+index a7ced6a..a7f0dd6 100644
+--- a/vita3k/modules/SceSysmodule/SceSysmodule.cpp
++++ b/vita3k/modules/SceSysmodule/SceSysmodule.cpp
+@@ -20,6 +20,7 @@
+ #include <kernel/state.h>
+ #include <module/load_module.h>
+ #include <modules/module_parent.h>
++#include <util/ranges_compat.h>
+ #include <util/tracy.h>
+ #include <util/vector_utils.h>
+ 
+@@ -191,7 +192,7 @@ EXPORT(int, sceSysmoduleIsLoadedInternal, SceSysmoduleInternalModuleId module_id
+         return RET_ERROR(SCE_SYSMODULE_ERROR_INVALID_VALUE);
+ 
+     std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
+-    if (std::ranges::contains(emuenv.kernel.loaded_internal_sysmodules, module_id))
++    if (VITA3K_RANGES_CONTAINS(emuenv.kernel.loaded_internal_sysmodules, module_id))
+         return SCE_SYSMODULE_LOADED;
+     else
+         return RET_ERROR(SCE_SYSMODULE_ERROR_UNLOADED);
+diff --git a/vita3k/ngs/src/ngs.cpp b/vita3k/ngs/src/ngs.cpp
+index 1d37129..0bc2d44 100644
+--- a/vita3k/ngs/src/ngs.cpp
++++ b/vita3k/ngs/src/ngs.cpp
+@@ -22,6 +22,7 @@
+ #include <ngs/state.h>
+ #include <ngs/system.h>
+ #include <util/lock_and_find.h>
++#include <util/ranges_compat.h>
+ 
+ #include <util/vector_utils.h>
+ 
+@@ -219,7 +220,7 @@ bool Voice::remove_patch(const MemState &mem, const Ptr<Patch> patch) {
+     const std::lock_guard<std::mutex> guard(*voice_mutex);
+     bool found = false;
+     for (auto &patches_1 : patches) {
+-        if (std::ranges::contains(patches_1, patch)) {
++        if (VITA3K_RANGES_CONTAINS(patches_1, patch)) {
+             found = true;
+             break;
+         }
+diff --git a/vita3k/ngs/src/route.cpp b/vita3k/ngs/src/route.cpp
+index fff2007..d306cfb 100644
+--- a/vita3k/ngs/src/route.cpp
++++ b/vita3k/ngs/src/route.cpp
+@@ -17,6 +17,7 @@
+ 
+ #include <ngs/system.h>
+ 
++#include <util/ranges_compat.h>
+ #include <util/vector_utils.h>
+ 
+ namespace ngs {
+@@ -33,7 +34,7 @@ bool deliver_data(const MemState &mem, const std::vector<Voice *> &voice_queue,
+             continue;
+ 
+         Voice *dest = patch->dest.get(mem);
+-        if (!dest || !std::ranges::contains(voice_queue, dest))
++        if (!dest || !VITA3K_RANGES_CONTAINS(voice_queue, dest))
+             continue;
+ 
+         const std::lock_guard<std::mutex> guard(*dest->voice_mutex);
+diff --git a/vita3k/util/include/util/vector_utils.h b/vita3k/util/include/util/vector_utils.h
+index e9ca88c..60449a1 100644
+--- a/vita3k/util/include/util/vector_utils.h
++++ b/vita3k/util/include/util/vector_utils.h
+@@ -57,7 +57,14 @@ size_t find_index(const T &v, const V &value) {
+ 
+ template <typename T, typename V>
+ bool push_if_not_exists(T &v, const V &value) {
+-    if (!std::ranges::contains(v, value)) {
++#if defined(__APPLE__)
++    // Apple's shipped libc++ (frozen to the Xcode/SDK release) does not yet implement
++    // the C++23 std::ranges::contains algorithm used below. Fall back to std::find.
++    const bool exists = std::find(std::begin(v), std::end(v), value) != std::end(v);
++#else
++    const bool exists = std::ranges::contains(v, value);
++#endif
++    if (!exists) {
+         v.push_back(value);
+         return false;
+     } else {
+diff --git a/vita3k/util/src/string_utils.cpp b/vita3k/util/src/string_utils.cpp
+index eb14d90..8aa64a1 100644
+--- a/vita3k/util/src/string_utils.cpp
++++ b/vita3k/util/src/string_utils.cpp
+@@ -38,12 +38,26 @@ std::string wide_to_utf(const std::wstring &str) {
+ }
+ 
+ std::string trim_copy(std::string_view str) {
++#if defined(__APPLE__)
++    // Apple's shipped libc++ (frozen to the Xcode/SDK release) does not yet implement
++    // the C++23 std::ranges::to / std::views::drop_while range adaptors used below.
++    // Fall back to a manual implementation for macOS/iOS builds.
++    const auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
++    size_t begin = 0;
++    while (begin < str.size() && is_space(static_cast<unsigned char>(str[begin])))
++        ++begin;
++    size_t end = str.size();
++    while (end > begin && is_space(static_cast<unsigned char>(str[end - 1])))
++        --end;
++    return std::string(str.substr(begin, end - begin));
++#else
+     return str
+         | std::views::drop_while([](unsigned char ch) { return std::isspace(ch); })
+         | std::views::reverse
+         | std::views::drop_while([](unsigned char ch) { return std::isspace(ch); })
+         | std::views::reverse
+         | std::ranges::to<std::string>();
++#endif
+ }
+ 
+ std::string remove_special_chars(std::string str) {
+diff --git a/vita3k/util/src/tracy.cpp b/vita3k/util/src/tracy.cpp
+index 3919dc4..d7f2037 100644
+--- a/vita3k/util/src/tracy.cpp
++++ b/vita3k/util/src/tracy.cpp
+@@ -83,7 +83,14 @@ void load_from(const std::vector<std::string> &active_modules_str) {
+ void cleanup(std::vector<std::string> &active_modules_str) {
+     // remove if not found in tracy_available_advanced_profiling_modules
+     std::erase_if(active_modules_str, [](const std::string &module) {
+-        return !std::ranges::contains(get_tracy_available_advanced_profiling_modules(), module);
++        const auto &available = get_tracy_available_advanced_profiling_modules();
++#if defined(__APPLE__)
++        // Apple's shipped libc++ (frozen to the Xcode/SDK release) does not yet implement
++        // the C++23 std::ranges::contains algorithm used below. Fall back to std::find.
++        return std::find(std::begin(available), std::end(available), module) == std::end(available);
++#else
++        return !std::ranges::contains(available, module);
++#endif
+     });
+ }
+ 

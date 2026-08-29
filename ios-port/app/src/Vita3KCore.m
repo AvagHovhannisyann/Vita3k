@@ -16,6 +16,9 @@ extern kern_return_t mach_vm_remap(vm_map_t, mach_vm_address_t *, mach_vm_size_t
                                    vm_prot_t *, vm_prot_t *, vm_inherit_t);
 extern kern_return_t mach_vm_protect(vm_map_t, mach_vm_address_t, mach_vm_size_t, boolean_t, vm_prot_t);
 extern kern_return_t mach_vm_deallocate(vm_map_t, mach_vm_address_t, mach_vm_size_t);
+extern kern_return_t mach_vm_allocate(vm_map_t, mach_vm_address_t *, mach_vm_size_t, int);
+#import <sys/mman.h>
+#import <errno.h>
 #import <libkern/OSCacheControl.h>
 #import <setjmp.h>
 #import <signal.h>
@@ -51,7 +54,8 @@ extern int csops(pid_t pid, unsigned int ops, void *buf, size_t size);
 #define CS_DEBUGGED   0x10000000u
 
 static sigjmp_buf g_jb;
-static void v3k_sig(int s) { (void)s; siglongjmp(g_jb, 1); }
+static volatile int g_lastsig;   // signal that aborted the last guarded probe
+static void v3k_sig(int s) { g_lastsig = s; siglongjmp(g_jb, 1); }
 
 @implementation V3KTitle @end
 
@@ -288,5 +292,171 @@ static unsigned long long dirSize(NSString *path) {
 - (void)sendRightStickX:(float)x y:(float)y {}
 - (void)sendTouchFront:(CGPoint)p down:(BOOL)down {}
 - (void)shutdown { vita3k_ios_shutdown(); }
+
+
+#pragma mark - JIT diagnostics
+
+- (BOOL)processIsDebugged {
+    unsigned int f = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &f, sizeof f) != 0) return NO;
+    return (f & CS_DEBUGGED) != 0;
+}
+
+- (NSString *)codeSigningFlagsDescription {
+    unsigned int f = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &f, sizeof f) != 0) return @"csops() unavailable";
+    NSMutableArray *bits = [NSMutableArray array];
+    if (f & 0x00000001u) [bits addObject:@"valid"];
+    if (f & 0x00000002u) [bits addObject:@"adhoc"];
+    if (f & 0x00000004u) [bits addObject:@"get-task-allow"];
+    if (f & 0x00001000u) [bits addObject:@"enforcement"];
+    if (f & 0x00002000u) [bits addObject:@"require-LV"];
+    if (f & 0x02000000u) [bits addObject:@"dyld-platform"];
+    if (f & 0x10000000u) [bits addObject:@"DEBUGGED"];
+    if (f & 0x20000000u) [bits addObject:@"signed"];
+    return [NSString stringWithFormat:@"0x%08x [%@]", f, [bits componentsJoinedByString:@" "]];
+}
+
+// bti c ; mov w0,#42 ; ret   (bti decodes as NOP on pre-ARMv8.5 cores)
+static const uint32_t kProbeCode[3] = { 0xD503245Fu, 0x52800540u, 0xD65F03C0u };
+
+static const char *signame_(int s) {
+    return s == SIGILL ? "SIGILL" : s == SIGBUS ? "SIGBUS" : s == SIGSEGV ? "SIGSEGV"
+         : s == SIGTRAP ? "SIGTRAP" : "fault";
+}
+
+// Execute `mem` under a fault guard. Returns 1 on the expected result, 0 on a
+// wrong value, -1 if it faulted (signal name written to sigOut).
+static int guarded_exec(void *mem, const char **sigOut) {
+    struct sigaction sa = {0}, ob = {0}, os = {0}, oi = {0}, ot = {0};
+    sa.sa_handler = v3k_sig;
+    sigaction(SIGBUS, &sa, &ob); sigaction(SIGSEGV, &sa, &os);
+    sigaction(SIGILL, &sa, &oi); sigaction(SIGTRAP, &sa, &ot);
+    g_lastsig = 0;
+    int rc;
+    if (sigsetjmp(g_jb, 1) == 0) {
+        int v = ((int (*)(void))mem)();
+        rc = (v == 42) ? 1 : 0;
+    } else {
+        rc = -1;
+        if (sigOut) *sigOut = signame_(g_lastsig);
+    }
+    sigaction(SIGBUS, &ob, NULL); sigaction(SIGSEGV, &os, NULL);
+    sigaction(SIGILL, &oi, NULL); sigaction(SIGTRAP, &ot, NULL);
+    return rc;
+}
+
+- (NSString *)jitDiagnosticsReport {
+    NSMutableString *r = [NSMutableString string];
+    NSOperatingSystemVersion v = NSProcessInfo.processInfo.operatingSystemVersion;
+    [r appendFormat:@"iOS %ld.%ld.%ld\n", (long)v.majorVersion, (long)v.minorVersion, (long)v.patchVersion];
+    [r appendFormat:@"CS %@\n", [self codeSigningFlagsDescription]];
+    BOOL dbg = self.processIsDebugged;
+    [r appendFormat:@"debugged: %@\n\n", dbg ? @"YES" : @"no"];
+
+    const size_t len = 16384;
+    const char *sig = NULL;
+
+    // A) JIT26 brk handshake (the iOS 26/27 TXM path) — only if debugged, since
+    //    a brk with no debugger script attached would kill the process.
+    if (!dbg) {
+        [r appendString:@"A JIT26 handshake: skipped (not debugged — enable JIT in StikDebug first)\n"];
+    } else {
+        void *rx = NULL;
+        struct sigaction sa = {0}, ot = {0};
+        sa.sa_handler = v3k_sig; sigaction(SIGTRAP, &sa, &ot);
+        g_lastsig = 0;
+        if (sigsetjmp(g_jb, 1) == 0) rx = JIT26PrepareRegion(NULL, len); else rx = NULL;
+        sigaction(SIGTRAP, &ot, NULL);
+        if (!rx || rx == (void *)-1) {
+            [r appendFormat:@"A JIT26 handshake: no region (%s) — StikDebug may not implement it\n",
+                            g_lastsig ? signame_(g_lastsig) : "declined"];
+        } else {
+            mach_vm_address_t rw = 0; vm_prot_t cur = 0, mx = 0;
+            kern_return_t kr = mach_vm_remap(mach_task_self(), &rw, len, 0, VM_FLAGS_ANYWHERE,
+                                             mach_task_self(), (mach_vm_address_t)(uintptr_t)rx,
+                                             false, &cur, &mx, VM_INHERIT_NONE);
+            if (kr != KERN_SUCCESS) {
+                [r appendFormat:@"A JIT26: RX@%p prepared but RW alias failed (kr=%d)\n", rx, kr];
+            } else {
+                mach_vm_protect(mach_task_self(), rw, len, false, VM_PROT_READ | VM_PROT_WRITE);
+                struct sigaction s2 = {0}, o2 = {0}; s2.sa_handler = v3k_sig;
+                sigaction(SIGTRAP, &s2, &o2);
+                if (sigsetjmp(g_jb, 1) == 0) JIT26Detach();
+                sigaction(SIGTRAP, &o2, NULL);
+                memcpy((void *)(uintptr_t)rw, kProbeCode, sizeof kProbeCode);
+                sys_icache_invalidate(rx, sizeof kProbeCode);
+                sig = NULL;
+                int rc = guarded_exec(rx, &sig);
+                mach_vm_deallocate(mach_task_self(), rw, len);
+                if (rc == 1) { [r appendString:@"A JIT26 handshake: PASS — executed emitted code\n"];
+                               [r appendString:@"\nRESULT: JIT WORKS via the StikDebug JIT26 protocol.\n"]; return r; }
+                [r appendFormat:@"A JIT26 handshake: prepared, but execute %s\n", rc < 0 ? sig : "wrong result"];
+            }
+        }
+    }
+
+    // B) vm_remap dual-mapping (no debugger handshake)
+    {
+        mach_vm_address_t rw = 0;
+        if (mach_vm_allocate(mach_task_self(), &rw, len, VM_FLAGS_ANYWHERE) == KERN_SUCCESS) {
+            memcpy((void *)(uintptr_t)rw, kProbeCode, sizeof kProbeCode);
+            mach_vm_address_t rx = 0; vm_prot_t c = 0, m = 0;
+            if (mach_vm_remap(mach_task_self(), &rx, len, 0, VM_FLAGS_ANYWHERE,
+                              mach_task_self(), rw, false, &c, &m, VM_INHERIT_NONE) == KERN_SUCCESS &&
+                mach_vm_protect(mach_task_self(), rx, len, false, VM_PROT_READ | VM_PROT_EXECUTE) == KERN_SUCCESS) {
+                sys_icache_invalidate((void *)(uintptr_t)rx, sizeof kProbeCode);
+                sig = NULL;
+                int rc = guarded_exec((void *)(uintptr_t)rx, &sig);
+                mach_vm_deallocate(mach_task_self(), rx, len);
+                if (rc == 1) { mach_vm_deallocate(mach_task_self(), rw, len);
+                               [r appendString:@"B dual-map (vm_remap): PASS\n\nRESULT: JIT WORKS via vm_remap dual-mapping.\n"]; return r; }
+                [r appendFormat:@"B dual-map (vm_remap): execute %s\n", rc < 0 ? sig : "wrong result"];
+            } else {
+                [r appendString:@"B dual-map (vm_remap): could not map an RX alias\n"];
+            }
+            mach_vm_deallocate(mach_task_self(), rw, len);
+        }
+    }
+
+    // C) oaknut/dynarmic path: mmap(R+X) -> mprotect(RW) -> write -> mprotect(R+X)
+    {
+        void *p = mmap(NULL, len, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+        if (p == MAP_FAILED) {
+            [r appendFormat:@"C mmap(R+X): failed errno=%d\n", errno];
+        } else {
+            if (mprotect(p, len, PROT_READ | PROT_WRITE) != 0) {
+                [r appendFormat:@"C mprotect(RW): denied errno=%d\n", errno];
+            } else {
+                memcpy(p, kProbeCode, sizeof kProbeCode);
+                if (mprotect(p, len, PROT_READ | PROT_EXEC) != 0) {
+                    [r appendFormat:@"C mprotect(R+X): denied errno=%d\n", errno];
+                } else {
+                    sys_icache_invalidate(p, sizeof kProbeCode);
+                    sig = NULL;
+                    int rc = guarded_exec(p, &sig);
+                    if (rc == 1) { munmap(p, len);
+                                   [r appendString:@"C oaknut path: PASS\n\nRESULT: JIT WORKS via mprotect toggling.\n"]; return r; }
+                    [r appendFormat:@"C oaknut path: execute %s\n", rc < 0 ? sig : "wrong result"];
+                }
+            }
+            munmap(p, len);
+        }
+    }
+
+    // D) MAP_JIT (needs the allow-jit entitlement; expected EPERM when sideloaded)
+    {
+        void *p = mmap(NULL, len, PROT_READ | PROT_WRITE | PROT_EXEC,
+                       MAP_ANON | MAP_PRIVATE | 0x0800 /*MAP_JIT*/, -1, 0);
+        if (p == MAP_FAILED) [r appendFormat:@"D MAP_JIT: failed errno=%d (expected without the entitlement)\n", errno];
+        else { [r appendString:@"D MAP_JIT: mapped (unexpected — entitlement present?)\n"]; munmap(p, len); }
+    }
+
+    [r appendString:@"\nRESULT: no route to executable memory succeeded.\n"];
+    if (!dbg) [r appendString:@"Enable JIT for Vita3K in StikDebug (with this app running), then re-run.\n"];
+    else      [r appendString:@"The process IS debugged but the kernel still refuses execute.\n"
+                              @"On iOS 26/27 this usually means the JIT26 protocol did not complete.\n"];
+    return r;
+}
 
 @end
