@@ -1,6 +1,8 @@
 // Vita3KCore.m — stub bridge implementation. Compiles and runs today; the
 // native Vita3K core is linked in behind the same interface later.
 #import "Vita3KCore.h"
+#import "Sfo.h"
+#import "Vpk.h"
 #import <mach/mach.h>
 #import <sys/sysctl.h>
 
@@ -147,6 +149,49 @@ static void v3k_sig(int s) { (void)s; siglongjmp(g_jb, 1); }
     return ok;
 }
 
+static NSString *regionForTitleId(NSString *tid) {
+    if (tid.length < 4) return @"—";
+    NSString *p = [tid substringToIndex:4];
+    if ([p isEqualToString:@"PCSF"] || [p isEqualToString:@"PCSA"]) return @"US";
+    if ([p isEqualToString:@"PCSB"] || [p isEqualToString:@"PCSC"]) return @"EU";
+    if ([p isEqualToString:@"PCSD"] || [p isEqualToString:@"PCSG"]) return @"JP";
+    if ([p isEqualToString:@"PCSE"] || [p isEqualToString:@"PCSH"]) return @"US";
+    return @"—";
+}
+
+static unsigned long long dirSize(NSString *path) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    unsigned long long total = 0;
+    NSDirectoryEnumerator *e = [fm enumeratorAtPath:path];
+    for (NSString *sub in e) {
+        NSDictionary *a = e.fileAttributes;
+        if ([a.fileType isEqualToString:NSFileTypeRegular]) total += a.fileSize;
+    }
+    return total;
+}
+
+- (V3KTitle *)titleFromAppDir:(NSString *)base titleId:(NSString *)tid {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    V3KTitle *t = [V3KTitle new];
+    t.titleId = tid;
+    t.appPath = base;
+    t.region = regionForTitleId(tid);
+    t.name = tid;
+    t.category = @"gd";
+    NSString *sfo = [base stringByAppendingPathComponent:@"sce_sys/param.sfo"];
+    NSDictionary *p = V3KParseSfoAtPath(sfo);
+    if (p) {
+        if ([p[@"TITLE"] isKindOfClass:NSString.class]) t.name = p[@"TITLE"];
+        if ([p[@"APP_VER"] isKindOfClass:NSString.class]) t.version = p[@"APP_VER"];
+        if ([p[@"CATEGORY"] isKindOfClass:NSString.class]) t.category = p[@"CATEGORY"];
+        if ([p[@"TITLE_ID"] isKindOfClass:NSString.class]) t.titleId = p[@"TITLE_ID"];
+    }
+    NSString *icon = [base stringByAppendingPathComponent:@"sce_sys/icon0.png"];
+    if ([fm fileExistsAtPath:icon]) t.iconPath = icon;
+    t.sizeBytes = dirSize(base);
+    return t;
+}
+
 - (NSArray<V3KTitle *> *)installedTitles {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *appDir = [self.dataRoot stringByAppendingPathComponent:@"ux0/app"];
@@ -154,24 +199,79 @@ static void v3k_sig(int s) { (void)s; siglongjmp(g_jb, 1); }
     for (NSString *tid in [fm contentsOfDirectoryAtPath:appDir error:nil] ?: @[]) {
         NSString *base = [appDir stringByAppendingPathComponent:tid];
         BOOL dir = NO;
-        if (![fm fileExistsAtPath:base isDirectory:&dir] || !dir) continue;
-        V3KTitle *t = [V3KTitle new];
-        t.titleId = tid;
-        t.name = tid;   // real core parses sce_sys/param.sfo TITLE
-        NSString *icon = [base stringByAppendingPathComponent:@"sce_sys/icon0.png"];
-        if ([fm fileExistsAtPath:icon]) t.iconPath = icon;
-        t.category = @"gd";
-        [out addObject:t];
+        if (![fm fileExistsAtPath:base isDirectory:&dir] || !dir || [tid hasPrefix:@"."]) continue;
+        [out addObject:[self titleFromAppDir:base titleId:tid]];
+    }
+    [out sortUsingComparator:^NSComparisonResult(V3KTitle *a, V3KTitle *b) {
+        return [a.name caseInsensitiveCompare:b.name];
+    }];
+    return out;
+}
+
+- (NSDictionary<NSString *, id> *)inspectPackageAtURL:(NSURL *)url {
+    BOOL scoped = [url startAccessingSecurityScopedResource];
+    NSData *sfo = V3KZipReadEntry(url.path, @"sce_sys/param.sfo");
+    if (scoped) [url stopAccessingSecurityScopedResource];
+    return sfo ? V3KParseSfoData(sfo) : nil;
+}
+
+- (BOOL)importPackageAtURL:(NSURL *)url error:(NSError **)error {
+    __block BOOL ok = NO; __block NSError *e = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    [self installPackageAtURL:url progress:nil completion:^(BOOL success, NSString *tid, NSError *err) {
+        ok = success; e = err; dispatch_semaphore_signal(sem);
+    }];
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    if (!ok && error) *error = e;
+    return ok;
+}
+
+- (void)installPackageAtURL:(NSURL *)url
+                   progress:(void (^)(double))progress
+                 completion:(void (^)(BOOL, NSString *, NSError *))completion {
+    NSString *root = self.dataRoot;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        BOOL scoped = [url startAccessingSecurityScopedResource];
+        // Determine target titleId from the VPK's own param.sfo.
+        NSString *titleId = nil;
+        NSData *sfo = V3KZipReadEntry(url.path, @"sce_sys/param.sfo");
+        NSDictionary *p = sfo ? V3KParseSfoData(sfo) : nil;
+        if ([p[@"TITLE_ID"] isKindOfClass:NSString.class]) titleId = p[@"TITLE_ID"];
+        if (!titleId) titleId = url.lastPathComponent.stringByDeletingPathExtension;
+
+        NSString *dest = [[root stringByAppendingPathComponent:@"ux0/app"] stringByAppendingPathComponent:titleId];
+        [NSFileManager.defaultManager removeItemAtPath:dest error:nil];
+        NSError *err = nil;
+        BOOL ok = V3KZipExtractAll(url.path, dest, progress, &err);
+        if (scoped) [url stopAccessingSecurityScopedResource];
+        NSString *tid = titleId;
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, ok ? tid : nil, err); });
+    });
+}
+
+- (BOOL)importFirmwareAtURL:(NSURL *)url error:(NSError **)error {
+    BOOL scoped = [url startAccessingSecurityScopedResource];
+    NSString *dst = [[self.dataRoot stringByAppendingPathComponent:@"import"]
+                     stringByAppendingPathComponent:url.lastPathComponent];
+    [NSFileManager.defaultManager removeItemAtPath:dst error:nil];
+    BOOL ok = [NSFileManager.defaultManager copyItemAtURL:url toURL:[NSURL fileURLWithPath:dst] error:error];
+    if (scoped) [url stopAccessingSecurityScopedResource];
+    return ok;   // The core installs the staged PUP into vs0 on next boot.
+}
+
+- (NSArray<NSString *> *)saveDataPathsForTitle:(V3KTitle *)title {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *saveRoot = [self.dataRoot stringByAppendingPathComponent:@"ux0/user/00/savedata"];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *e in [fm contentsOfDirectoryAtPath:saveRoot error:nil] ?: @[]) {
+        if ([e hasPrefix:title.titleId]) [out addObject:[saveRoot stringByAppendingPathComponent:e]];
     }
     return out;
 }
 
-- (BOOL)importPackageAtURL:(NSURL *)url error:(NSError **)error {
-    NSString *dst = [[self.dataRoot stringByAppendingPathComponent:@"import"]
-                     stringByAppendingPathComponent:url.lastPathComponent];
-    [NSFileManager.defaultManager removeItemAtPath:dst error:nil];
-    return [NSFileManager.defaultManager copyItemAtURL:url toURL:[NSURL fileURLWithPath:dst] error:error];
-    // The real core: unpack VPK/PKG into ux0:/app/<titleId> and register it.
+- (BOOL)firmwareInstalled {
+    NSString *vs0 = [self.dataRoot stringByAppendingPathComponent:@"vs0/sys"];
+    return [NSFileManager.defaultManager fileExistsAtPath:vs0];
 }
 
 - (BOOL)deleteTitle:(V3KTitle *)title error:(NSError **)error {

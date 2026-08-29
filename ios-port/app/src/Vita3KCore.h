@@ -15,6 +15,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy)   NSString *name;        // display name from param.sfo
 @property (nonatomic, copy, nullable) NSString *iconPath;  // path to icon0.png
 @property (nonatomic, copy, nullable) NSString *category;  // "gd" (game), "gp" (patch)...
+@property (nonatomic, copy, nullable) NSString *version;   // APP_VER, e.g. "01.00"
+@property (nonatomic, copy, nullable) NSString *region;    // derived from titleId prefix
+@property (nonatomic, copy)   NSString *appPath;     // ux0:/app/<titleId> on disk
+@property (nonatomic, assign) unsigned long long sizeBytes;
 @end
 
 typedef NS_ENUM(NSInteger, V3KJITState) {
@@ -48,11 +52,26 @@ typedef NS_ENUM(NSInteger, V3KJITState) {
 // --- Titles ---
 /// Scan ux0:/app for installed titles.
 - (NSArray<V3KTitle *> *)installedTitles;
-/// Install a .vpk / .pkg package. (Stub copies into the data tree; the real
-/// core unpacks and registers it.)
+/// Install a .vpk synchronously (real zip extraction into ux0:/app). Kept for
+/// simple callers; prefer installPackageAtURL:progress:completion: for a UI.
 - (BOOL)importPackageAtURL:(NSURL *)url error:(NSError **_Nullable)error;
+/// Preview a .vpk before installing: returns its param.sfo fields (TITLE,
+/// TITLE_ID, APP_VER, CATEGORY...) or nil if not readable.
+- (nullable NSDictionary<NSString *, id> *)inspectPackageAtURL:(NSURL *)url;
+/// Install a .vpk (a zip): extracts it into ux0:/app/<titleId>. `progress` is
+/// called 0..1 on a background thread. The `completion` runs on the main queue.
+- (void)installPackageAtURL:(NSURL *)url
+                   progress:(void (^_Nullable)(double))progress
+                 completion:(void (^)(BOOL ok, NSString *_Nullable titleId, NSError *_Nullable error))completion;
+/// Import a firmware PUP (staged into the data tree for the core to install).
+- (BOOL)importFirmwareAtURL:(NSURL *)url error:(NSError **_Nullable)error;
 /// Delete an installed title.
 - (BOOL)deleteTitle:(V3KTitle *)title error:(NSError **_Nullable)error;
+
+/// Save-data folders for a title (ux0:/user/00/savedata/<id>*), by path.
+- (NSArray<NSString *> *)saveDataPathsForTitle:(V3KTitle *)title;
+/// Whether firmware appears installed (vs0 populated).
+@property (nonatomic, readonly) BOOL firmwareInstalled;
 
 // --- Emulation ---
 /// Boot a title into the given Metal-backed layer. (Stub reports not-ready.)

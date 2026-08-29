@@ -39,7 +39,8 @@ PATH="$IOSBIN:$PATH" clang -target arm64-apple-ios14.0 -isysroot "$SDK" \
   -fuse-ld=lld -Wl,-adhoc_codesign \
   -framework UIKit -framework Foundation -framework CoreGraphics \
   -framework QuartzCore -framework Metal -framework GameController \
-  -framework UniformTypeIdentifiers \
+  -framework UniformTypeIdentifiers -framework CoreHaptics \
+  -lz \
   "${OBJS[@]}" -o "$OUT/Vita3K"
 
 echo "==> ad-hoc sign with get-task-allow (JIT/StikDebug)"
