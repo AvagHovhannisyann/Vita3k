@@ -30,15 +30,29 @@ python3 "$HERE/pngtool.py" "$OUT/extracted/res/GX.png" \
     180:"$OUT/icons/AppIcon180.png" \
     1024:"$OUT/icons/AppIcon1024.png"
 
+# Prefer a real Apple iPhoneOS SDK when one is present (genuine framework stubs,
+# real headers); fall back to the hand-authored minimal TBD stubs otherwise.
+REAL_SDK="${IOS_SDK:-/home/user/theos/sdks/iPhoneOS16.5.sdk}"
+if [ -d "$REAL_SDK" ]; then
+    echo "==> using real iOS SDK: $REAL_SDK"
+    SYSROOT_ARGS=(-isysroot "$REAL_SDK")
+    LINK_ARGS=(-syslibroot "$REAL_SDK" -lSystem -lobjc -framework UIKit -framework Foundation)
+    SDK_VER=16.5
+else
+    echo "==> real iOS SDK not found; using minimal TBD stubs"
+    SYSROOT_ARGS=()
+    LINK_ARGS=(-L"$SDK/usr/lib" -lSystem -lobjc -F"$SDK/System/Library/Frameworks" -framework UIKit)
+    SDK_VER=16.4
+fi
+
 echo "==> [3/7] compile iOS ARM64 objects (clang, Mach-O)"
-clang -target arm64-apple-ios12.0 -fno-objc-arc -fobjc-runtime=ios-12.0 \
+clang -target arm64-apple-ios12.0 "${SYSROOT_ARGS[@]}" -fno-objc-arc -fobjc-runtime=ios-12.0 \
       -Wall -Wno-unused-function -Os -c "$HERE/src/main.m" -o "$OUT/main.o"
 
 echo "==> [4/7] link Mach-O executable (lld darwin) with reserved code-signature"
-lld -flavor darwin -arch arm64 -platform_version ios 12.0 16.4 \
+lld -flavor darwin -arch arm64 -platform_version ios 12.0 "$SDK_VER" \
     -o "$OUT/ConvertedApp" "$OUT/main.o" \
-    -L"$SDK/usr/lib" -lSystem -lobjc \
-    -F"$SDK/System/Library/Frameworks" -framework UIKit \
+    "${LINK_ARGS[@]}" \
     -e _main -pie -adhoc_codesign
 
 echo "==> [5/7] ad-hoc sign with embedded get-task-allow entitlement"

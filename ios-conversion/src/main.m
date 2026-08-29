@@ -277,8 +277,37 @@ static int jit_selftest(char *out, int n) {
         log_add("CS flags: csops() unavailable\n");
     }
 
+    /* --- E: oaknut/dynarmic's REAL iOS sequence -------------------------- *
+     * This is what Vita3K's own JIT does on iOS (oaknut code_block.hpp,
+     * TARGET_OS_IPHONE branch):
+     *     mmap(PROT_READ|PROT_EXEC)      <-- EXEC present at creation time
+     *     mprotect(RW) -> write -> mprotect(RX) -> sys_icache_invalidate
+     * Creating the mapping WITH exec matters: on Darwin a region's maximum
+     * protection is fixed at mmap() time, so a page born RW-only can be
+     * permanently barred from ever becoming executable. Try this first. */
+    void *m = mmap(nil, len, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (m == MAP_FAILED) {
+        log_err("E mmap(R+X): FAILED", errno);
+    } else {
+        if (mprotect(m, len, PROT_READ | PROT_WRITE) != 0) {
+            log_err("E mprotect(RW) to write: DENIED", errno);
+        } else {
+            memcpy(m, JIT_CODE, sizeof JIT_CODE);
+            if (mprotect(m, len, PROT_READ | PROT_EXEC) != 0) {
+                log_err("E mprotect(back to R+X): DENIED", errno);
+            } else if (try_exec(m)) {
+                munmap(m, len);
+                snprintf(out, n, "PASS \xE2\x80\x94 JIT ACTIVE\nExecuted emitted ARM64 code (returned 42).\nvia oaknut's iOS path: mmap(R+X) \xE2\x86\x92 mprotect(RW) \xE2\x86\x92 write \xE2\x86\x92 mprotect(R+X).\nThis is exactly what Vita3K's Dynarmic JIT does on iOS.");
+                return 1;
+            } else {
+                log_fault("E oaknut path, execute FAULTED:");
+            }
+        }
+        munmap(m, len);
+    }
+
     /* --- A: the sideload/StikDebug path --------------------------------- */
-    void *m = mmap(nil, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    m = mmap(nil, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (m == MAP_FAILED) {
         log_add("A mmap(RW): FAILED\n");
     } else {
