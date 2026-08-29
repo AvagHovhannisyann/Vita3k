@@ -25,6 +25,14 @@ for m in "$HERE"/src/*.m; do
         -Wall -Wno-unused -O2 -I"$HERE/src" -c "$m" -o "$o"
   OBJS+=("$o")
 done
+# C sources (e.g. the core stub for UI-preview builds; omit when linking the real core)
+for c in "$HERE"/src/*.c; do
+  [ -e "$c" ] || continue
+  o="$OUT/obj/$(basename "${c%.c}").o"
+  echo "    CC $(basename "$c")"
+  clang -target arm64-apple-ios14.0 -isysroot "$SDK" -Wall -O2 -c "$c" -o "$o"
+  OBJS+=("$o")
+done
 
 echo "==> link Vita3K executable"
 PATH="$IOSBIN:$PATH" clang -target arm64-apple-ios14.0 -isysroot "$SDK" \

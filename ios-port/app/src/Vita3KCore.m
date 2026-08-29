@@ -18,11 +18,24 @@ extern kern_return_t mach_vm_deallocate(vm_map_t, mach_vm_address_t, mach_vm_siz
 #import <setjmp.h>
 #import <signal.h>
 
-// ---- Optional native core entry points (weak: present only once linked) ----
-extern const char *vita3k_ios_version(void) __attribute__((weak));
-extern int  vita3k_ios_boot(const char *title_id, void *metal_layer) __attribute__((weak));
-extern void vita3k_ios_send_buttons(uint32_t mask) __attribute__((weak));
-extern void vita3k_ios_shutdown(void) __attribute__((weak));
+// ---- Native core entry points. Defined by CoreStub.m in a UI-preview build;
+// the real Vita3K core library provides the strong versions (and makes
+// vita3k_ios_present() return 1) when it is linked in. ----
+extern int  vita3k_ios_present(void);
+extern const char *vita3k_ios_version(void);
+extern int  vita3k_ios_boot(const char *title_id, void *metal_layer);
+extern void vita3k_ios_send_buttons(uint32_t mask);
+extern void vita3k_ios_shutdown(void);
+
+// The cross-toolchain doesn't ship compiler-rt's iOS builtins, so provide the
+// availability helper that `@available(...)` lowers to.
+int32_t __isPlatformVersionAtLeast(uint32_t platform, uint32_t major, uint32_t minor, uint32_t subminor) {
+    (void)platform;
+    NSOperatingSystemVersion v = NSProcessInfo.processInfo.operatingSystemVersion;
+    if (v.majorVersion != (NSInteger)major) return v.majorVersion > (NSInteger)major;
+    if (v.minorVersion != (NSInteger)minor) return v.minorVersion > (NSInteger)minor;
+    return v.patchVersion >= (NSInteger)subminor;
+}
 
 // ---- JIT26 brk #0xf00d handshake (StikDebug iOS-26 protocol) ----
 __attribute__((noinline, naked)) static void *JIT26PrepareRegion(void *addr, unsigned long len) {
@@ -59,11 +72,11 @@ static void v3k_sig(int s) { (void)s; siglongjmp(g_jb, 1); }
     return self;
 }
 
-- (BOOL)coreLinked { return (vita3k_ios_boot != NULL); }
+- (BOOL)coreLinked { return vita3k_ios_present() != 0; }
 
 - (NSString *)coreVersion {
-    if (vita3k_ios_version != NULL) return [NSString stringWithUTF8String:vita3k_ios_version()];
-    return @"native core not linked yet";
+    const char *v = vita3k_ios_version();
+    return v ? [NSString stringWithUTF8String:v] : @"native core not linked yet";
 }
 
 - (NSString *)dataRoot {
@@ -168,12 +181,12 @@ static void v3k_sig(int s) { (void)s; siglongjmp(g_jb, 1); }
 }
 
 - (void)bootTitleId:(NSString *)titleId inLayer:(CALayer *)layer {
-    if (vita3k_ios_boot != NULL) vita3k_ios_boot(titleId.UTF8String, (__bridge void *)layer);
+    vita3k_ios_boot(titleId.UTF8String, (__bridge void *)layer);
 }
-- (void)sendButtons:(uint32_t)mask { if (vita3k_ios_send_buttons) vita3k_ios_send_buttons(mask); }
+- (void)sendButtons:(uint32_t)mask { vita3k_ios_send_buttons(mask); }
 - (void)sendLeftStickX:(float)x y:(float)y {}
 - (void)sendRightStickX:(float)x y:(float)y {}
 - (void)sendTouchFront:(CGPoint)p down:(BOOL)down {}
-- (void)shutdown { if (vita3k_ios_shutdown) vita3k_ios_shutdown(); }
+- (void)shutdown { vita3k_ios_shutdown(); }
 
 @end

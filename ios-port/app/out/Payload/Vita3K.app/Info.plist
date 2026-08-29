@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key><string>Vita3K</string>
+	<key>CFBundleDisplayName</key><string>Vita3K</string>
+	<key>CFBundleIdentifier</key><string>org.vita3k.emulator</string>
+	<key>CFBundleExecutable</key><string>Vita3K</string>
+	<key>CFBundleVersion</key><string>0.2.1</string>
+	<key>CFBundleShortVersionString</key><string>0.2.1</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>LSRequiresIPhoneOS</key><true/>
+	<key>MinimumOSVersion</key><string>14.0</string>
+	<key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+	<key>DTPlatformName</key><string>iphoneos</string>
+
+	<key>UIRequiredDeviceCapabilities</key><array><string>arm64</string><string>metal</string></array>
+	<key>UILaunchScreen</key><dict/>
+	<key>UIRequiresFullScreen</key><true/>
+	<key>UIStatusBarHidden</key><true/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+
+	<key>CFBundleIcons</key>
+	<dict><key>CFBundlePrimaryIcon</key><dict>
+		<key>CFBundleIconName</key><string>AppIcon</string>
+		<key>CFBundleIconFiles</key><array><string>AppIcon120</string><string>AppIcon180</string></array>
+	</dict></dict>
+	<key>CFBundleIconFiles</key>
+	<array><string>AppIcon120</string><string>AppIcon152</string><string>AppIcon167</string><string>AppIcon180</string></array>
+
+	<!-- Let users add Vita games via Files / iTunes sharing -->
+	<key>UIFileSharingEnabled</key><true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key><true/>
+	<key>UISupportsDocumentBrowser</key><false/>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key><string>PS Vita package</string>
+			<key>LSHandlerRank</key><string>Owner</string>
+			<key>LSItemContentTypes</key><array><string>public.item</string></array>
+		</dict>
+	</array>
+
+	<!-- Controllers & haptics (Android gamepad/vibrate equivalents) -->
+	<key>UIApplicationSupportsIndirectInputEvents</key><true/>
+	<key>GCSupportsControllerUserInteraction</key><true/>
+
+	<key>ITSAppUsesNonExemptEncryption</key><false/>
+</dict>
+</plist>

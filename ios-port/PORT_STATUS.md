@@ -36,7 +36,7 @@ allocated while StikDebug is attached (task: patch oaknut/dynarmic).
 | glslang / SPIR-V builtin shaders | ⬜ (shaders reusable verbatim from APK) |
 | Vita3K core static lib | ⬜ |
 | Headless "core boots" on device | ⬜ |
-| iOS front-end (touch UI, game loading, controls) | ⬜ (~40k lines; neither Qt nor Kotlin UI reusable) |
+| **iOS front-end (touch UI, game loading, controls)** | 🟡 **scaffold builds & runs**: `Vita3K.ipa` — Library/Settings/About tabs, .vpk/.pkg import, full on-screen Vita gamepad, Enable-JIT button, core-bridge with weak core hook. Emulator core not yet wired. |
 
 ## Reproduce
 
@@ -57,6 +57,15 @@ Two of the three hard core stacks — CPU/JIT (dynarmic) and graphics-shader
 translation (SPIRV-Cross, incl. the Metal/MSL backend) — now build for iOS.
 The third hard part (the front-end) is UI engineering, not a build-feasibility
 question.
+
+The front-end app:
+```bash
+ios-port/app/build-app.sh      # -> Vita3K.ipa (real arm64 iOS app you can sideload)
+```
+It builds all screens + the core bridge, ad-hoc signs with get-task-allow, and
+packages an IPA. The emulator core links in behind `Vita3KCore` (the bridge)
+via the `vita3k_ios_*` entry points; until then `CoreStub.c` provides
+placeholders and the UI runs in "preview" mode.
 
 ## Honest assessment
 
