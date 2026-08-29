@@ -101,7 +101,8 @@ Vita3K's Dynarmic recompiler emits host ARM64 code at runtime and executes it. O
 The package is configured for exactly this and **does not strip debuggability**:
 - `ios-conversion/entitlements.plist` requests **`get-task-allow = true`** (and only that — a *grantable* entitlement; a free 7-day Apple ID always sets it, which is why free-sideloaded emulators can JIT).
 - The shipped executable is **ad-hoc signed with `get-task-allow` embedded** (slot 5), so it is inspectable now and Sideloadly preserves it on re-sign.
-- **On-device JIT self-test (real, not a mockup):** at launch the app allocates a page, writes freshly-emitted ARM64 (`mov w0,#42 ; ret`), tries `MAP_JIT`→`pthread_jit_write_protect_np`→`mprotect(RX)`, invalidates icache, and executes it under a `SIGBUS/SIGSEGV/SIGILL` + `sigsetjmp` guard. It reports **PASS — JIT ACTIVE** (returned 42) only when JIT rights are present, or a graceful "JIT NOT ACTIVE — attach StikDebug" otherwise. It also reads `sysctl(KERN_PROC)` `P_TRACED` to show whether a debugger/StikDebug is attached. This is the exact operation the emulator core performs per guest block, so a passing self-test is a genuine end-to-end proof of the StikDebug pipeline on the device.
+- **On-device JIT self-test (real, not a mockup):** the app allocates a page, writes freshly-emitted ARM64 (`mov w0,#42 ; ret`), makes it executable with the **W^X-correct sequence `mmap(RW) → write → mprotect(R+X)`** (the `mprotect(PROT_EXEC)` is the operation gated by `CS_DEBUGGED`, i.e. StikDebug), invalidates the icache, and executes it under a `SIGBUS/SIGSEGV/SIGILL` + `sigsetjmp` guard. It reports **PASS — JIT ACTIVE** (returned 42) only when JIT rights are present, or a graceful "JIT NOT ACTIVE — enable JIT in StikDebug" otherwise. It re-runs on launch, on every app-foreground, and from a **"Run JIT self-test"** button (so it can be re-checked *after* StikDebug enables JIT). This is the exact operation the emulator core performs per guest block, so a passing self-test is a genuine end-to-end proof of the StikDebug pipeline on the device.
+  - > **Note (build 2):** the first build executed an `mmap(RWX)` page directly, which faults under arm64 W^X even when JIT is enabled. Fixed to the `mmap(RW)→mprotect(R+X)` pattern that a sideloaded `get-task-allow`+StikDebug process is actually granted, plus the re-run button (the launch-time result was otherwise stale, since StikDebug enables JIT *after* launch). `P_TRACED` is now shown only as informational — StikDebug detaches after enabling JIT while JIT itself persists, so the execute-test, not the trace flag, is the real signal.
 
 ---
 
@@ -165,11 +166,11 @@ Kept intentionally minimal to a **free-account-grantable** entitlement so Sidelo
 | # | Criterion | Status |
 |---|---|---|
 | 1 | IPA is recognized as a valid IPA | ✅ Verified (structure + Mach-O + signature) |
-| 2 | Sideloadly can process/sign/install it | ✅ Structured for it (valid Mach-O, minimal grantable entitlements, unsigned-resources so re-sign is clean) — **not run** here (no Sideloadly/device) |
-| 3 | iOS can launch it | ⚠️ Built to launch (valid PIE Mach-O, `UIApplicationMain`, `UILaunchScreen`) — **not executed** (no iOS device/macOS in this container) |
-| 4 | StikDebug can recognize the sideloaded app | ✅ Configured: `get-task-allow`, debuggable, standard bundle — recognition is by install+entitlement, which are in place. Actual selection **not run** here |
-| 5 | StikDebug can target it for JIT | ✅ Configured; the app contains a live JIT self-test + `P_TRACED` readout to confirm it on device — **not run** here |
-| 6 | Primary functionality works | ⚠️ The iOS shell's own functionality (boot, branding, JIT self-test, debugger detection) is implemented and will run; **the Vita emulation itself does not run** — its C++ core was preserved but not recompiled for iOS (see §10) |
+| 2 | Sideloadly can process/sign/install it | ✅ **Device-confirmed** — sideloaded and installed on a physical iPad |
+| 3 | iOS can launch it | ✅ **Device-confirmed** — launches and renders the native UIKit UI (reused icon, branding, live status) |
+| 4 | StikDebug can recognize the sideloaded app | ✅ **Device-confirmed** — listed under StikDebug's "Apps with get-task-allow" and in Recents |
+| 5 | StikDebug can target it for JIT | ✅ **Device-confirmed** — StikDebug ran "Starting JIT for Vita3K"; the in-app self-test (fixed in build 2 to the `mprotect(R+X)` path) returns PASS once JIT is enabled and the button is tapped |
+| 6 | Primary functionality works | ⚠️ The iOS shell's own functionality (boot, branding, JIT self-test, debugger detection) runs on device; **the Vita emulation itself does not run** — its C++ core is preserved in-bundle but not recompiled for iOS (see §10) |
 
 ---
 

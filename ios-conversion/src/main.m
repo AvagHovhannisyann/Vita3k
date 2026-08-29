@@ -148,49 +148,59 @@ static void restore_faults(void) {
     sigaction(SIGILL,  &g_old_ill,  (struct d_sigaction *)0);
 }
 
-/* Returns 1=JIT active (pass), 0=blocked, -1=alloc failure; fills `out`. */
+/*
+ * Returns 1=JIT active (pass), 0=blocked, -1=alloc failure; fills `out`.
+ *
+ * On arm64 iOS a page may never be simultaneously writable AND executable
+ * (W^X / APRR). The sequence a sideloaded, get-task-allow + StikDebug process
+ * is actually granted is:  mmap(RW) -> write -> mprotect(R+X) -> execute.
+ * The mprotect(PROT_EXEC) call is the operation gated by CS_DEBUGGED: it fails
+ * with EPERM until StikDebug (a debugger) has flipped the process debuggable,
+ * and succeeds afterwards. (Directly executing an mmap(RWX) page does NOT work
+ * even with JIT enabled, because the page is still writable — that was the bug
+ * in the first build.) MAP_JIT + pthread_jit_write_protect_np is a *different*
+ * path that needs the com.apple.security.cs.allow-jit entitlement, which a free
+ * sideload does not have, so it is attempted only as a best-effort fast path.
+ */
+static const uint32_t JIT_CODE[2] = { 0x52800540u /* mov w0, #42 */, 0xD65F03C0u /* ret */ };
+
 static int jit_selftest(char *out, int n) {
     const size_t len = 4096;
-    const char *method;
-    int used_mprotect = 0;
-    void *mem = mmap(nil, len, PROT_READ | PROT_WRITE | PROT_EXEC,
-                     MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
-    if (mem != MAP_FAILED) {
-        method = "mmap(RWX, MAP_JIT)";
-    } else {
-        mem = mmap(nil, len, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
-        if (mem != MAP_FAILED) {
-            method = "mmap(RWX)";
-        } else {
-            mem = mmap(nil, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
-            if (mem == MAP_FAILED) { snprintf(out, n, "mmap failed — cannot allocate code page"); return -1; }
-            method = "mmap(RW) -> mprotect(RX)";
-            used_mprotect = 1;
-        }
-    }
+    const char *method = "mmap(RW) -> mprotect(R+X)";
+    void *mem = MAP_FAILED;
 
-    /* If pthread_jit_write_protect_np exists (iOS 14.2+ MAP_JIT), unlock writes. */
+    /* Fast path: MAP_JIT (only if the allow-jit entitlement + toggle fn exist). */
     void (*jit_wp)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np");
-    if (jit_wp) jit_wp(0);
+    void *jmem = mmap(nil, len, PROT_READ | PROT_WRITE | PROT_EXEC,
+                      MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
+    if (jmem != MAP_FAILED && jit_wp) {
+        method = "mmap(MAP_JIT) + pthread_jit_write_protect_np";
+        jit_wp(0);
+        memcpy(jmem, JIT_CODE, sizeof JIT_CODE);
+        jit_wp(1);
+        mem = jmem;
+    } else {
+        if (jmem != MAP_FAILED) munmap(jmem, len);   /* MAP_JIT page unusable without toggle fn */
 
-    uint32_t code[2] = { 0x52800540u /* mov w0, #42 */, 0xD65F03C0u /* ret */ };
-    memcpy(mem, code, sizeof code);
-
-    if (jit_wp) jit_wp(1);
-
-    if (used_mprotect) {
+        /* Sideload / StikDebug path: RW, write, then flip to R+X. */
+        mem = mmap(nil, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+        if (mem == MAP_FAILED) { snprintf(out, n, "mmap(RW) failed — cannot allocate a code page."); return -1; }
+        memcpy(mem, JIT_CODE, sizeof JIT_CODE);
         if (mprotect(mem, len, PROT_READ | PROT_EXEC) != 0) {
-            snprintf(out, n, "JIT BLOCKED — mprotect(RX) denied.\nSign with get-task-allow and enable JIT via StikDebug, then relaunch.\n(allocation: %s)", method);
             munmap(mem, len);
+            snprintf(out, n,
+                "JIT NOT ACTIVE — mprotect(R+X) denied (EPERM).\n"
+                "The process is not debuggable yet.\n"
+                "In StikDebug, Enable JIT for Vita3K, then tap \xE2\x80\x9CRun JIT self-test\xE2\x80\x9D below.");
             return 0;
         }
     }
 
     /* flush the instruction cache for the freshly-written code */
     void (*icache)(void *, size_t) = (void (*)(void *, size_t))dlsym(RTLD_DEFAULT, "sys_icache_invalidate");
-    if (icache) icache(mem, sizeof code);
+    if (icache) icache(mem, sizeof JIT_CODE);
 
-    /* Execute under a fault guard so a W^X denial reports instead of crashing. */
+    /* Execute under a fault guard so any residual W^X denial reports, not crashes. */
     install_faults();
     volatile int result = -1;
     if (sigsetjmp(g_jbuf, 1) == 0) {
@@ -199,7 +209,11 @@ static int jit_selftest(char *out, int n) {
         restore_faults();
         munmap(mem, len);
         if (result == 42) {
-            snprintf(out, n, "PASS — JIT ACTIVE\nExecuted dynamically-emitted ARM64 machine code (returned %d).\nThe Dynarmic recompiler substrate can run.\n(allocation: %s)", result, method);
+            snprintf(out, n,
+                "PASS \xE2\x80\x94 JIT ACTIVE\n"
+                "Executed dynamically-emitted ARM64 machine code (returned %d).\n"
+                "The Dynarmic recompiler substrate can run on this device.\n"
+                "(via %s)", result, method);
             return 1;
         }
         snprintf(out, n, "Executed but returned %d (expected 42) via %s", result, method);
@@ -207,7 +221,9 @@ static int jit_selftest(char *out, int n) {
     } else {
         restore_faults();
         munmap(mem, len);
-        snprintf(out, n, "JIT NOT ACTIVE — execution of emitted code faulted (W^X enforced).\nThis is expected until a debugger grants JIT rights.\nSideload-sign with get-task-allow, then attach StikDebug and relaunch.\n(allocation: %s)", method);
+        snprintf(out, n,
+            "JIT NOT ACTIVE — emitted code faulted on execute (W^X).\n"
+            "In StikDebug, Enable JIT for Vita3K, then tap \xE2\x80\x9CRun JIT self-test\xE2\x80\x9D below.");
         return 0;
     }
 }
@@ -228,9 +244,43 @@ static int is_debugged(void) {
 /*  UI                                                                       */
 /* ========================================================================= */
 static id g_window;
+static id g_dbgLabel, g_jitHeader, g_jitBody;   /* live status labels (re-runnable) */
+
+/* Re-run the debugger check + JIT self-test and update the on-screen labels.
+ * Called at launch, whenever the app becomes active (e.g. after StikDebug
+ * enables JIT and returns focus), and from the "Run JIT self-test" button. */
+static void refresh_status(void) {
+    if (!g_jitBody) return;
+
+    int dbg = is_debugged();
+    char dbgline[160];
+    snprintf(dbgline, sizeof dbgline, "Debugger attached now:  %s   (JIT persists after detach)",
+             dbg == 1 ? "YES" : dbg == 0 ? "no" : "unknown");
+    send1(g_dbgLabel, "setText:", NSStr(dbgline));
+    send1(g_dbgLabel, "setTextColor:", dbg == 1 ? rgb(0.4, 0.9, 0.4, 1.0) : rgb(0.72, 0.70, 0.78, 1.0));
+
+    char jitbuf[512];
+    int jit = jit_selftest(jitbuf, sizeof jitbuf);
+    id jitColor = jit == 1 ? rgb(0.35, 0.92, 0.45, 1.0) : rgb(1.0, 0.62, 0.30, 1.0);
+    send1(g_jitHeader, "setText:", NSStr(jit == 1 ? "JIT SELF-TEST:  PASS" : "JIT SELF-TEST:  standby"));
+    send1(g_jitHeader, "setTextColor:", jitColor);
+    send1(g_jitBody, "setText:", NSStr(jitbuf));
+}
+
+/* Button action: -runTest: */
+static void runTest(id self, SEL _cmd, id sender) {
+    (void)self; (void)_cmd; (void)sender;
+    refresh_status();
+}
+
+/* -applicationDidBecomeActive: */
+static void didBecomeActive(id self, SEL _cmd, id application) {
+    (void)self; (void)_cmd; (void)application;
+    refresh_status();
+}
 
 static BOOL didFinishLaunching(id self, SEL _cmd, id application, id options) {
-    (void)self; (void)_cmd; (void)application; (void)options;
+    (void)_cmd; (void)application; (void)options;
 
     id screen = send0(C("UIScreen"), "mainScreen");
     CGRect bounds = ((CGRect(*)(id, SEL))objc_msgSend)(screen, S("bounds"));
@@ -244,20 +294,19 @@ static BOOL didFinishLaunching(id self, SEL _cmd, id application, id options) {
     send1(view, "setBackgroundColor:", rgb(0.09, 0.05, 0.11, 1.0));   /* Vita3K deep purple */
 
     CGFloat pad = 24.0;
-    CGFloat top = H * 0.10;
+    CGFloat top = H * 0.07;
 
     /* App icon (reused verbatim from the APK: res/GX.png) */
-    CGFloat iconSz = 108.0;
-    id iconView;
+    CGFloat iconSz = 96.0;
     id bundle = send0(C("NSBundle"), "mainBundle");
     id iconPath = ((id(*)(id, SEL, id, id))objc_msgSend)(bundle, S("pathForResource:ofType:"), NSStr("AppIcon180"), NSStr("png"));
     id iconImg = ((id(*)(id, SEL, id))objc_msgSend)(C("UIImage"), S("imageWithContentsOfFile:"), iconPath);
-    iconView = ((id(*)(id, SEL, id))objc_msgSend)(send0(C("UIImageView"), "alloc"), S("initWithImage:"), iconImg);
+    id iconView = ((id(*)(id, SEL, id))objc_msgSend)(send0(C("UIImageView"), "alloc"), S("initWithImage:"), iconImg);
     setFrame(iconView, RECT((W - iconSz) / 2.0, top, iconSz, iconSz));
     ((void(*)(id, SEL, long))objc_msgSend)(iconView, S("setContentMode:"), 1 /*ScaleAspectFit*/);
     addSub(view, iconView);
 
-    CGFloat y = top + iconSz + 16.0;
+    CGFloat y = top + iconSz + 14.0;
 
     id gold = rgb(1.0, 0.78, 0.10, 1.0);
     id white = rgb(0.96, 0.96, 0.98, 1.0);
@@ -267,35 +316,40 @@ static BOOL didFinishLaunching(id self, SEL _cmd, id application, id options) {
     addSub(view, title); y += 44;
 
     id subtitle = makeLabel(RECT(pad, y, W - 2 * pad, 24), "PlayStation Vita Emulator — iOS build", 15, 0, grey, 1);
-    addSub(view, subtitle); y += 34;
+    addSub(view, subtitle); y += 32;
 
     id meta = makeLabel(RECT(pad, y, W - 2 * pad, 40),
                         "Converted from org.vita3k.emulator (v0.2.1)\nAndroid APK \xE2\x86\x92 iOS ARM64 package", 12, 0, grey, 1);
-    addSub(view, meta); y += 52;
+    addSub(view, meta); y += 54;
 
-    /* Debugger / StikDebug status */
-    int dbg = is_debugged();
-    char dbgline[160];
-    snprintf(dbgline, sizeof dbgline, "Debugger / JIT bridge attached:  %s",
-             dbg == 1 ? "YES (StikDebug active)" : dbg == 0 ? "no (not yet attached)" : "unknown");
-    id dbgLabel = makeLabel(RECT(pad, y, W - 2 * pad, 24), dbgline, 13, 1,
-                            dbg == 1 ? rgb(0.4, 0.9, 0.4, 1.0) : grey, 1);
-    addSub(view, dbgLabel); y += 34;
+    g_dbgLabel = makeLabel(RECT(pad, y, W - 2 * pad, 24), " ", 13, 1, grey, 1);
+    addSub(view, g_dbgLabel); y += 32;
 
-    /* JIT self-test */
-    char jitbuf[512];
-    int jit = jit_selftest(jitbuf, sizeof jitbuf);
-    id jitColor = jit == 1 ? rgb(0.35, 0.92, 0.45, 1.0) : rgb(1.0, 0.62, 0.30, 1.0);
+    g_jitHeader = makeLabel(RECT(pad, y, W - 2 * pad, 24), " ", 17, 1, grey, 1);
+    addSub(view, g_jitHeader); y += 30;
 
-    id jitHeader = makeLabel(RECT(pad, y, W - 2 * pad, 22),
-                             jit == 1 ? "JIT SELF-TEST:  PASS" : "JIT SELF-TEST:  standby", 16, 1, jitColor, 1);
-    addSub(view, jitHeader); y += 28;
+    g_jitBody = makeLabel(RECT(pad, y, W - 2 * pad, 140), " ", 13.0, 0, white, 1);
+    addSub(view, g_jitBody);
 
-    id jitBody = makeLabel(RECT(pad, y, W - 2 * pad, H - y - 90), jitbuf, 12.5, 0, white, 1);
-    addSub(view, jitBody);
+    /* "Run JIT self-test" button — tap AFTER enabling JIT in StikDebug */
+    CGFloat bw = 260, bh = 48;
+    id btn = ((id(*)(id, SEL, long))objc_msgSend)(C("UIButton"), S("buttonWithType:"), 1 /*System*/);
+    setFrame(btn, RECT((W - bw) / 2.0, H - 150, bw, bh));
+    ((void(*)(id, SEL, id, long))objc_msgSend)(btn, S("setTitle:forState:"), NSStr("Run JIT self-test"), 0);
+    ((void(*)(id, SEL, id, long))objc_msgSend)(btn, S("setTitleColor:forState:"), rgb(0.09, 0.05, 0.11, 1.0), 0);
+    send1(btn, "setBackgroundColor:", gold);
+    id btnFont = ((id(*)(id, SEL, CGFloat))objc_msgSend)(C("UIFont"), S("boldSystemFontOfSize:"), 17.0);
+    send1(send0(btn, "titleLabel"), "setFont:", btnFont);
+    id blayer = send0(btn, "layer");
+    ((void(*)(id, SEL, CGFloat))objc_msgSend)(blayer, S("setCornerRadius:"), 12.0);
+    ((void(*)(id, SEL, id, SEL, long))objc_msgSend)(btn, S("addTarget:action:forControlEvents:"),
+        self, S("runTest:"), 1 << 6 /*UIControlEventTouchUpInside*/);
+    addSub(view, btn);
 
-    id footer = makeLabel(RECT(pad, H - 64, W - 2 * pad, 48),
-                          "Sideload with Sideloadly (free Apple ID sets get-task-allow),\nthen select this app in StikDebug to enable JIT.", 11, 0, grey, 1);
+    id footer = makeLabel(RECT(pad, H - 84, W - 2 * pad, 64),
+                          "Sideload with Sideloadly (free Apple ID sets get-task-allow).\n"
+                          "In StikDebug: Enable JIT for Vita3K, return here, tap the button.\n"
+                          "A green PASS means this device can run the Dynarmic JIT.", 11, 0, grey, 1);
     addSub(view, footer);
 
     ((void(*)(id, SEL, id))objc_msgSend)(g_window, S("setRootViewController:"), vc);
@@ -305,6 +359,7 @@ static BOOL didFinishLaunching(id self, SEL _cmd, id application, id options) {
     id app = send0(C("UIApplication"), "sharedApplication");
     ((void(*)(id, SEL, BOOL))objc_msgSend)(app, S("setIdleTimerDisabled:"), YES);
 
+    refresh_status();
     return YES;
 }
 
@@ -312,6 +367,8 @@ int main(int argc, char **argv) {
     Class Delegate = objc_allocateClassPair(C("UIResponder"), "Vita3KAppDelegate", 0);
     class_addMethod(Delegate, S("application:didFinishLaunchingWithOptions:"),
                     (IMP)didFinishLaunching, "c@:@@");
+    class_addMethod(Delegate, S("applicationDidBecomeActive:"), (IMP)didBecomeActive, "v@:@");
+    class_addMethod(Delegate, S("runTest:"), (IMP)runTest, "v@:@");
     objc_registerClassPair(Delegate);
     return UIApplicationMain(argc, argv, nil, NSStr("Vita3KAppDelegate"));
 }
