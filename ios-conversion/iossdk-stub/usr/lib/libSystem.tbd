@@ -6,5 +6,5 @@ current-version: 1.0.0
 compatibility-version: 1.0.0
 exports:
   - targets: [ arm64-ios ]
-    symbols: [ dyld_stub_binder, ___bzero, _memset_pattern16, _bzero, _strstr, _siglongjmp, _sigsetjmp, _sysctl, _malloc, _free, _calloc, _realloc, _memcpy, _memmove, _memset, _strlen, _strcmp, _strncmp, _strcpy, _strncpy, _strdup, _strcat, _snprintf, _vsnprintf, _printf, _fprintf, _puts, _abort, _exit, _usleep, _mmap, _munmap, _mprotect, _dlopen, _dlsym, _dlclose, _dlerror, _sigaction, _signal, _setjmp, _longjmp, __setjmp, __longjmp, _getpid, _gettimeofday, _mach_absolute_time, ___error, _pthread_create, _pthread_join, _pthread_detach, ___stack_chk_fail, ___stack_chk_guard ]
+    symbols: [ dyld_stub_binder, _sys_icache_invalidate, _csops, ___bzero, _memset_pattern16, _bzero, _strstr, _siglongjmp, _sigsetjmp, _sysctl, _malloc, _free, _calloc, _realloc, _memcpy, _memmove, _memset, _strlen, _strcmp, _strncmp, _strcpy, _strncpy, _strdup, _strcat, _snprintf, _vsnprintf, _printf, _fprintf, _puts, _abort, _exit, _usleep, _mmap, _munmap, _mprotect, _dlopen, _dlsym, _dlclose, _dlerror, _sigaction, _signal, _setjmp, _longjmp, __setjmp, __longjmp, _getpid, _gettimeofday, _mach_absolute_time, ___error, _pthread_create, _pthread_join, _pthread_detach, ___stack_chk_fail, ___stack_chk_guard ]
 ...

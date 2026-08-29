@@ -63,6 +63,20 @@ extern char *strstr(const char *h, const char *n);
 extern void *dlsym(void *handle, const char *sym);
 extern int   getpid(void);
 extern int   sysctl(int *name, unsigned namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
+extern size_t strlen(const char *s);
+extern int  *__error(void);                 /* errno location */
+extern void  sys_icache_invalidate(void *start, size_t len);
+/* csops(): ask the kernel for this process's CODE SIGNING status flags.
+   This is the authoritative answer to "did StikDebug actually grant JIT?" */
+extern int   csops(int pid, unsigned int ops, void *useraddr, size_t usersize);
+#define errno              (*__error())
+#define CS_OPS_STATUS      0
+#define CS_VALID           0x00000001u
+#define CS_GET_TASK_ALLOW  0x00000004u
+#define CS_INSTALLER       0x00000008u
+#define CS_HARD            0x00000100u
+#define CS_KILL            0x00000200u
+#define CS_DEBUGGED        0x10000000u
 
 /* signal / non-local jump for fault-safe execution of the JIT probe */
 extern int   sigsetjmp(void *env, int savemask);
@@ -164,68 +178,124 @@ static void restore_faults(void) {
  */
 static const uint32_t JIT_CODE[2] = { 0x52800540u /* mov w0, #42 */, 0xD65F03C0u /* ret */ };
 
-static int jit_selftest(char *out, int n) {
-    const size_t len = 4096;
-    const char *method = "mmap(RW) -> mprotect(R+X)";
-    void *mem = MAP_FAILED;
+/* Read this process's code-signing status. Returns 0 on success. */
+static int cs_flags(unsigned int *out) {
+    unsigned int f = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &f, sizeof f) != 0) return -1;
+    *out = f;
+    return 0;
+}
 
-    /* Fast path: MAP_JIT (only if the allow-jit entitlement + toggle fn exist). */
-    void (*jit_wp)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np");
-    void *jmem = mmap(nil, len, PROT_READ | PROT_WRITE | PROT_EXEC,
-                      MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
-    if (jmem != MAP_FAILED && jit_wp) {
-        method = "mmap(MAP_JIT) + pthread_jit_write_protect_np";
-        jit_wp(0);
-        memcpy(jmem, JIT_CODE, sizeof JIT_CODE);
-        jit_wp(1);
-        mem = jmem;
-    } else {
-        if (jmem != MAP_FAILED) munmap(jmem, len);   /* MAP_JIT page unusable without toggle fn */
+/* Append to a bounded log buffer. */
+static char *g_log; static int g_logpos, g_logcap;
+static void log_init(char *b, int cap) { g_log = b; g_logcap = cap; g_logpos = 0; if (cap) b[0] = 0; }
+static void log_add(const char *s) {
+    int n = (int)strlen(s), room = g_logcap - g_logpos - 1;
+    if (room <= 0) return;
+    if (n > room) n = room;
+    memcpy(g_log + g_logpos, s, (size_t)n);
+    g_logpos += n; g_log[g_logpos] = 0;
+}
+static void log_err(const char *what, int e) {
+    char t[192]; snprintf(t, sizeof t, "%s errno=%d\n", what, e); log_add(t);
+}
 
-        /* Sideload / StikDebug path: RW, write, then flip to R+X. */
-        mem = mmap(nil, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
-        if (mem == MAP_FAILED) { snprintf(out, n, "mmap(RW) failed — cannot allocate a code page."); return -1; }
-        memcpy(mem, JIT_CODE, sizeof JIT_CODE);
-        if (mprotect(mem, len, PROT_READ | PROT_EXEC) != 0) {
-            munmap(mem, len);
-            snprintf(out, n,
-                "JIT NOT ACTIVE — mprotect(R+X) denied (EPERM).\n"
-                "The process is not debuggable yet.\n"
-                "In StikDebug, Enable JIT for Vita3K, then tap \xE2\x80\x9CRun JIT self-test\xE2\x80\x9D below.");
-            return 0;
-        }
-    }
-
-    /* flush the instruction cache for the freshly-written code */
-    void (*icache)(void *, size_t) = (void (*)(void *, size_t))dlsym(RTLD_DEFAULT, "sys_icache_invalidate");
-    if (icache) icache(mem, sizeof JIT_CODE);
-
-    /* Execute under a fault guard so any residual W^X denial reports, not crashes. */
+/* Execute the emitted code under a fault guard. 1 = ran and returned 42. */
+static int try_exec(void *mem) {
+    sys_icache_invalidate(mem, sizeof JIT_CODE);
     install_faults();
-    volatile int result = -1;
+    volatile int r = -1;
     if (sigsetjmp(g_jbuf, 1) == 0) {
         int (*fn)(void) = (int (*)(void))mem;
-        result = fn();
+        r = fn();
         restore_faults();
-        munmap(mem, len);
-        if (result == 42) {
-            snprintf(out, n,
-                "PASS \xE2\x80\x94 JIT ACTIVE\n"
-                "Executed dynamically-emitted ARM64 machine code (returned %d).\n"
-                "The Dynarmic recompiler substrate can run on this device.\n"
-                "(via %s)", result, method);
+        return (r == 42);
+    }
+    restore_faults();
+    return 0;   /* faulted */
+}
+
+/*
+ * Try every route to executable memory, reporting exactly how each one failed.
+ * A: mmap(RW) -> mprotect(R+X)      <- what get-task-allow + StikDebug grants
+ * B: mmap(RWX) directly             <- works when the task is fully debugged
+ * C: MAP_JIT + pthread_jit_write_protect_np  <- needs the allow-jit entitlement
+ */
+static int jit_selftest(char *out, int n) {
+    const size_t len = 4096;
+    log_init(out, n);
+
+    unsigned int cs = 0;
+    int have_cs = cs_flags(&cs);
+    int debugged = (have_cs == 0) && (cs & CS_DEBUGGED);
+
+    if (have_cs == 0) {
+        char t[160];
+        snprintf(t, sizeof t, "CS flags 0x%08x  [%s%s%s]\n", cs,
+                 (cs & CS_VALID) ? "valid " : "",
+                 (cs & CS_GET_TASK_ALLOW) ? "get-task-allow " : "",
+                 debugged ? "DEBUGGED" : "NOT-debugged");
+        log_add(t);
+    } else {
+        log_add("CS flags: csops() unavailable\n");
+    }
+
+    /* --- A: the sideload/StikDebug path --------------------------------- */
+    void *m = mmap(nil, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (m == MAP_FAILED) {
+        log_add("A mmap(RW): FAILED\n");
+    } else {
+        memcpy(m, JIT_CODE, sizeof JIT_CODE);
+        if (mprotect(m, len, PROT_READ | PROT_EXEC) != 0) {
+            log_err("A mprotect(R+X): DENIED", errno);
+        } else if (try_exec(m)) {
+            munmap(m, len);
+            snprintf(out, n, "PASS \xE2\x80\x94 JIT ACTIVE\nExecuted emitted ARM64 code (returned 42).\nvia mmap(RW) \xE2\x86\x92 mprotect(R+X).\nThe Dynarmic recompiler substrate can run here.");
+            return 1;
+        } else {
+            log_add("A mprotect(R+X) OK but execute FAULTED\n");
+        }
+        munmap(m, len);
+    }
+
+    /* --- B: direct RWX --------------------------------------------------- */
+    m = mmap(nil, len, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (m == MAP_FAILED) {
+        log_err("B mmap(RWX): FAILED", errno);
+    } else {
+        memcpy(m, JIT_CODE, sizeof JIT_CODE);
+        if (try_exec(m)) {
+            munmap(m, len);
+            snprintf(out, n, "PASS \xE2\x80\x94 JIT ACTIVE\nExecuted emitted ARM64 code (returned 42).\nvia mmap(RWX).\nThe Dynarmic recompiler substrate can run here.");
             return 1;
         }
-        snprintf(out, n, "Executed but returned %d (expected 42) via %s", result, method);
-        return 0;
-    } else {
-        restore_faults();
-        munmap(mem, len);
-        snprintf(out, n,
-            "JIT NOT ACTIVE — emitted code faulted on execute (W^X).\n"
-            "In StikDebug, Enable JIT for Vita3K, then tap \xE2\x80\x9CRun JIT self-test\xE2\x80\x9D below.");
-        return 0;
+        log_add("B mmap(RWX) OK but execute FAULTED\n");
+        munmap(m, len);
     }
+
+    /* --- C: MAP_JIT ------------------------------------------------------ */
+    void (*jit_wp)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np");
+    m = mmap(nil, len, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
+    if (m == MAP_FAILED) {
+        log_err("C mmap(MAP_JIT): FAILED", errno);
+    } else {
+        if (jit_wp) jit_wp(0);
+        memcpy(m, JIT_CODE, sizeof JIT_CODE);
+        if (jit_wp) jit_wp(1);
+        if (try_exec(m)) {
+            munmap(m, len);
+            snprintf(out, n, "PASS \xE2\x80\x94 JIT ACTIVE\nExecuted emitted ARM64 code (returned 42).\nvia MAP_JIT.\nThe Dynarmic recompiler substrate can run here.");
+            return 1;
+        }
+        log_add(jit_wp ? "C MAP_JIT OK but execute FAULTED\n" : "C MAP_JIT ok, no write-protect fn\n");
+        munmap(m, len);
+    }
+
+    log_add(debugged
+        ? "\nProcess IS debugged but no route to executable memory worked."
+        : "\nDIAGNOSIS: this process is NOT debugged \xE2\x80\x94 StikDebug has not\nattached to it, so the kernel grants no JIT. Enable JIT in\nStikDebug while this app is running, then tap the button.");
+    return 0;
 }
 
 /* Detect whether a debugger / JIT-enabler (StikDebug) is attached. */
