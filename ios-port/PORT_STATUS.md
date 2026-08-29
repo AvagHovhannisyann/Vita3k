@@ -29,16 +29,20 @@ allocated while StikDebug is attached (task: patch oaknut/dynarmic).
 | oaknut ARM64 emitter | ✅ builds (bundled in dynarmic) |
 | Boost (header-only, for dynarmic) | ✅ isolated headers wired |
 | JIT allocator patched for iOS 26 (JIT26 + pre-prepared arena) | ⬜ next |
-| FFmpeg / OpenSSL / boost::filesystem / curl (arm64-ios) | ⬜ (FFmpeg is the hard one — no iOS prebuilt exists) |
+| **FFmpeg (avcodec/avformat/avutil/swscale/swresample)** | ✅ **cross-built from source, n6.1, H.264/AAC/MP3** (no iOS prebuilt exists — done the hard way) |
+| **OpenSSL 3.3.2 (libssl/libcrypto)** | ✅ built |
+| **libcurl 8.11.0** | ✅ built (Apple Secure Transport TLS, self-contained) |
+| **boost::filesystem + system** | ✅ compiled from source |
 | SDL3 (iOS/UIKit) | ⬜ (upstream supports iOS) |
-| MoltenVK (Vulkan→Metal) | ✅ prebuilt ios-arm64 available (34 MB) |
+| MoltenVK (Vulkan→Metal) | ✅ prebuilt ios-arm64 `libMoltenVK.a` + Vulkan headers staged |
 | **SPIRV-Cross (shader translation, incl. MSL→Metal backend)** | ✅ **cross-compiles to 8 arm64 Mach-O libs (core/glsl/hlsl/msl/cpp/reflect/util/c)** |
 | **glslang (GLSL→SPIR-V front-end)** | ✅ builds (libglslang.a + resource-limits) |
 | **SDL3 (windowing/input/audio)** | ✅ **builds with the real UIKit/iOS backend** (uikitappdelegate/video/metalview/vulkan + Metal renderer) |
 | **capstone (disassembler)** | ✅ builds (needs CAPSTONE_BUILD_MACOS_THIN=ON to avoid a universal2 build) |
 | **fmt / spdlog / yaml-cpp / pugixml** | ✅ all build for arm64-ios |
 | builtin SPIR-V shaders | ✅ reusable verbatim from APK |
-| Vita3K core static lib | ⬜ |
+| **Dependency tree (all 28 libs)** | ✅ **COMPLETE — every Vita3K dependency cross-compiles for arm64-iOS** (staged in `/home/user/ios-deps`) |
+| Vita3K core static lib (`libVita3K`) | ⬜ next: make Vita3K's own CMake iOS-aware, then compile |
 | Headless "core boots" on device | ⬜ |
 | **iOS front-end (touch UI, game loading, controls)** | 🟡 **scaffold builds & runs**: `Vita3K.ipa` — Library/Settings/About tabs, .vpk/.pkg import, full on-screen Vita gamepad, Enable-JIT button, core-bridge with weak core hook. Emulator core not yet wired. |
 
