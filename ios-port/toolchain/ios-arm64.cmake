@@ -16,12 +16,18 @@ set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "")
 set(CMAKE_OSX_DEPLOYMENT_TARGET "${IOS_DEPLOYMENT_TARGET}" CACHE STRING "")
 
 set(_triple "arm64-apple-ios${IOS_DEPLOYMENT_TARGET}")
-set(CMAKE_C_COMPILER   clang)
-set(CMAKE_CXX_COMPILER clang++)
-set(CMAKE_ASM_COMPILER clang)
-set(CMAKE_C_COMPILER_TARGET   "${_triple}")
-set(CMAKE_CXX_COMPILER_TARGET "${_triple}")
-set(CMAKE_ASM_COMPILER_TARGET "${_triple}")
+set(CMAKE_C_COMPILER      clang)
+set(CMAKE_CXX_COMPILER    clang++)
+set(CMAKE_ASM_COMPILER    clang)
+set(CMAKE_OBJC_COMPILER   clang)
+set(CMAKE_OBJCXX_COMPILER clang++)
+set(CMAKE_C_COMPILER_TARGET      "${_triple}")
+set(CMAKE_CXX_COMPILER_TARGET    "${_triple}")
+set(CMAKE_ASM_COMPILER_TARGET    "${_triple}")
+# Objective-C/C++ need the triple too, else their probe compiles for the host
+# (SDL and other UIKit-using deps enable OBJC and would misdetect otherwise).
+set(CMAKE_OBJC_COMPILER_TARGET   "${_triple}")
+set(CMAKE_OBJCXX_COMPILER_TARGET "${_triple}")
 
 # Real Apple stubs live in the SDK; drive linking through clang + lld (Mach-O).
 add_compile_options(-isysroot "${IOS_SDK}")
