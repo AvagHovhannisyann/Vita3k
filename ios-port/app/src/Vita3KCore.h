@@ -28,6 +28,10 @@ typedef NS_ENUM(NSInteger, V3KJITState) {
     V3KJITFailed,
 };
 
+/// Posted on the main queue whenever the JIT/arena state changes, so any screen
+/// showing JIT status can refresh itself.
+extern NSNotificationName const V3KJITStateDidChangeNotification;
+
 @interface Vita3KCore : NSObject
 
 + (instancetype)shared;
@@ -48,6 +52,21 @@ typedef NS_ENUM(NSInteger, V3KJITState) {
 /// process to be debugged (StikDebug attached). Safe to call when not debugged
 /// (returns NO, fills error). Never crashes.
 - (BOOL)prepareJITWithError:(NSError **_Nullable)error;
+/// Asynchronous form of -prepareJITWithError:. The JIT26 handshake can stall
+/// for seconds when no debugger script answers it, so UI code must use this.
+/// `completion` runs on the main queue.
+- (void)prepareJITWithCompletion:(void (^_Nullable)(BOOL ok, NSError *_Nullable error))completion;
+
+/// YES once the emulator's single executable arena is up: JIT26 handshake done
+/// while StikDebug was attached, writable alias dual-mapped, detach performed,
+/// and a real instruction executed out of it. THIS — not merely CS_DEBUGGED —
+/// is the precondition for booting a game, because the handshake is one-shot
+/// per attach and cannot be repeated once emulation has started.
+@property (nonatomic, readonly) BOOL jitArenaReady;
+/// One-line arena state for the UI, e.g. "arena 96 MB, 0 B used".
+@property (nonatomic, readonly) NSString *jitArenaStatus;
+/// YES if a real (non-stub) arena implementation is linked into this build.
+@property (nonatomic, readonly) BOOL jitArenaImplemented;
 
 /// YES if the process is currently marked debugged (csops CS_DEBUGGED).
 @property (nonatomic, readonly) BOOL processIsDebugged;

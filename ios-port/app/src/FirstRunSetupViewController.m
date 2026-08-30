@@ -225,9 +225,13 @@ static NSString *const kV3KSetupDoneKey = @"v3k.setupDone";
 }
 
 - (void)testJITTapped {
-    NSError *err = nil;
-    BOOL ok = [[Vita3KCore shared] prepareJITWithError:&err];
+    self.jitResultLabel.text = @"Asking StikDebug for executable memory\u2026";
+    [[Vita3KCore shared] prepareJITWithCompletion:^(BOOL ok, NSError *err) {
+        [self showJITResult:ok error:err];
+    }];
+}
 
+- (void)showJITResult:(BOOL)ok error:(NSError *)err {
     NSString *symbol;
     UIColor *color;
     NSString *text;

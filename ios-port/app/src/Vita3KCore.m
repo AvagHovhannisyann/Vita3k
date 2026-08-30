@@ -1,6 +1,7 @@
 // Vita3KCore.m — stub bridge implementation. Compiles and runs today; the
 // native Vita3K core is linked in behind the same interface later.
 #import "Vita3KCore.h"
+#import "JitArena.h"
 #import "Sfo.h"
 #import "Vpk.h"
 #import <mach/mach.h>
@@ -91,9 +92,19 @@ static void *prepare_region_guarded(unsigned long len, double seconds, const cha
     return out;
 }
 
+NSNotificationName const V3KJITStateDidChangeNotification = @"V3KJITStateDidChange";
+
+// Default arena size. Desktop dynarmic uses a 128 MB code cache; on a handheld
+// we ask for 96 MB and the core halves the request if the debugger declines it.
+// Whatever we get is ALL the executable memory this process will ever have.
+static const unsigned long kV3KArenaBytes = 96ul << 20;
+
 @implementation V3KTitle @end
 
-@interface Vita3KCore () { V3KJITState _jit; }
+@interface Vita3KCore () { V3KJITState _jit; int _arenaImpl; }  // _arenaImpl: 0 unknown, 1 real, -1 stub
+- (BOOL)legacyProbeWithError:(NSError **)error;
+@end
+@interface Vita3KCore ()
 @end
 
 @implementation Vita3KCore
@@ -136,13 +147,127 @@ static void *prepare_region_guarded(unsigned long len, double seconds, const cha
 
 - (NSString *)statusLine {
     NSString *core = self.coreLinked ? @"core linked" : @"UI preview (core not linked)";
-    NSString *jit = _jit == V3KJITReady ? @"JIT ready"
-                  : _jit == V3KJITUnavailable ? @"JIT off — enable in StikDebug"
-                  : _jit == V3KJITFailed ? @"JIT failed" : @"JIT not tested";
+    NSString *jit;
+    if (v3k_ios_jit_ready()) {
+        unsigned long sz = v3k_ios_jit_size(), used = v3k_ios_jit_used();
+        jit = [NSString stringWithFormat:@"JIT arena %lu MB (%lu MB used)", sz >> 20, used >> 20];
+    } else {
+        jit = _jit == V3KJITReady ? @"JIT ready"
+            : _jit == V3KJITUnavailable ? @"JIT off — enable in StikDebug"
+            : _jit == V3KJITFailed ? @"JIT failed" : @"JIT not prepared";
+    }
     return [NSString stringWithFormat:@"%@  ·  %@", core, jit];
 }
 
+// ---------------------------------------------------------------------------
+// The single pre-prepared executable arena.
+//
+// The JIT26 handshake is ONE-SHOT per StikDebug attach: regions can only be
+// blessed while the debugger is attached, and JIT26Detach() ends that window
+// for good. So we take one big arena here, up front, and the recompiler
+// sub-allocates every block of code out of it for the rest of the session.
+// Running the handshake twice is not a retry — it is a guaranteed failure —
+// which is why every entry point below is idempotent and checks readiness
+// before touching the brk.
+// ---------------------------------------------------------------------------
+
+- (BOOL)jitArenaReady { return v3k_ios_jit_ready() != 0; }
+
+- (BOOL)jitArenaImplemented {
+    if (_arenaImpl == 0) return YES;   // not probed yet — assume the real core
+    return _arenaImpl > 0;
+}
+
+- (NSString *)jitArenaStatus {
+    if (_arenaImpl < 0) return @"no arena in this build (UI-preview mode)";
+    const char *st = v3k_ios_jit_status();
+    return st ? [NSString stringWithUTF8String:st] : @"unknown";
+}
+
+- (void)postJITChanged {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSNotificationCenter.defaultCenter postNotificationName:V3KJITStateDidChangeNotification object:self];
+    });
+}
+
+- (void)prepareJITWithCompletion:(void (^)(BOOL, NSError *))completion {
+    void (^finish)(BOOL, NSError *) = ^(BOOL ok, NSError *e) {
+        [self postJITChanged];
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, e); });
+    };
+
+    // Already up. Never re-run the handshake — it cannot succeed a second time.
+    if (v3k_ios_jit_ready()) { _jit = V3KJITReady; finish(YES, nil); return; }
+    if (_jit == V3KJITReady && _arenaImpl < 0) { finish(YES, nil); return; }  // preview probe already passed
+
+    unsigned int flags = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof flags) != 0 || !(flags & CS_DEBUGGED)) {
+        _jit = V3KJITUnavailable;
+        finish(NO, [NSError errorWithDomain:@"Vita3K" code:1 userInfo:@{
+            NSLocalizedDescriptionKey: @"Not debugged. In StikDebug, enable JIT for Vita3K with the script "
+                                        "universal.js attached, then come back — the app prepares its memory automatically."}]);
+        return;
+    }
+
+    // Do the work off the main thread: the brk can stall for seconds, and the
+    // core guards it with its own 8 s timeout. Our outer wait is the backstop.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        __block int rc = V3K_JIT_NO_IMPL;
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            rc = v3k_ios_jit_init(kV3KArenaBytes);
+            dispatch_semaphore_signal(done);
+        });
+        BOOL timedOut = dispatch_semaphore_wait(done,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(25.0 * NSEC_PER_SEC))) != 0;
+
+        if (timedOut) {
+            self->_jit = V3KJITFailed;
+            finish(NO, [NSError errorWithDomain:@"Vita3K" code:3 userInfo:@{
+                NSLocalizedDescriptionKey: @"The debugger never answered the JIT handshake. Make sure StikDebug is "
+                                            "still running and that universal.js is attached to Vita3K, then relaunch."}]);
+            return;
+        }
+
+        if (rc == V3K_JIT_NO_IMPL) {
+            // No arena compiled in (UI-preview build): fall back to the small
+            // standalone probe so the diagnostics screen still means something.
+            self->_arenaImpl = -1;
+            NSError *e = nil;
+            BOOL ok = [self legacyProbeWithError:&e];
+            finish(ok, ok ? nil : e);
+            return;
+        }
+
+        self->_arenaImpl = 1;
+        BOOL ok = (rc == 0) && v3k_ios_jit_ready();
+        self->_jit = ok ? V3KJITReady : V3KJITFailed;
+        finish(ok, ok ? nil : [NSError errorWithDomain:@"Vita3K" code:4 userInfo:@{
+            NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                @"Could not reserve the executable arena: %@. Re-enable JIT in StikDebug (with universal.js "
+                 "attached) and relaunch Vita3K — the handshake only works once per attach.",
+                self.jitArenaStatus]}]);
+    });
+}
+
 - (BOOL)prepareJITWithError:(NSError **)error {
+    if (v3k_ios_jit_ready()) { _jit = V3KJITReady; return YES; }
+    __block BOOL ok = NO; __block NSError *err = nil;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    [self prepareJITWithCompletion:^(BOOL o, NSError *e) { ok = o; err = e; dispatch_semaphore_signal(done); }];
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC))) != 0) {
+        if (error) *error = [NSError errorWithDomain:@"Vita3K" code:5 userInfo:@{
+            NSLocalizedDescriptionKey: @"Timed out preparing JIT memory."}];
+        return NO;
+    }
+    if (!ok && error) *error = err;
+    return ok;
+}
+
+// The original standalone 1 MB probe. Only used when no arena implementation is
+// linked (UI-preview builds) — it burns the one-shot attach, so it must never
+// run in a build that has the real core.
+- (BOOL)legacyProbeWithError:(NSError **)error {
     unsigned int flags = 0;
     if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof flags) != 0 || !(flags & CS_DEBUGGED)) {
         _jit = V3KJITUnavailable;
@@ -319,6 +444,15 @@ static unsigned long long dirSize(NSString *path) {
 }
 
 - (void)bootTitleId:(NSString *)titleId inLayer:(CALayer *)layer {
+    // Guard rail. The recompiler will ask for executable memory the moment the
+    // guest executes its first instruction, and on iOS that memory can only
+    // come from an arena blessed BEFORE the debugger detached. Booting without
+    // one does not degrade gracefully — it faults. Refuse instead.
+    if (self.coreLinked && _arenaImpl >= 0 && !v3k_ios_jit_ready()) {
+        NSLog(@"[Vita3K] refusing to boot %@: JIT arena not prepared (%s)",
+              titleId, v3k_ios_jit_status());
+        return;
+    }
     vita3k_ios_boot(titleId.UTF8String, (__bridge void *)layer);
 }
 - (void)sendButtons:(uint32_t)mask { vita3k_ios_send_buttons(mask); }
@@ -391,11 +525,60 @@ static int guarded_exec(void *mem, const char **sigOut) {
     const size_t len = 16384;
     const char *sig = NULL;
 
+    // A0) The arena is what actually matters. If it is already up, report it and
+    //     do NOT touch the brk again — the handshake is one-shot per attach, and
+    //     re-running it here is exactly what made the second run of this screen
+    //     report "no region (faulted)" on device.
+    if (v3k_ios_jit_ready()) {
+        [r appendFormat:@"A JIT arena: READY — %s\n", v3k_ios_jit_status()];
+        [r appendFormat:@"  rx=%p rw=%p  %lu MB (%lu MB used)\n",
+            v3k_ios_jit_rx(), v3k_ios_jit_rw(), v3k_ios_jit_size() >> 20, v3k_ios_jit_used() >> 20];
+        const char *asig = NULL;
+        int arc = guarded_exec(v3k_ios_jit_rx(), &asig);
+        [r appendString: arc == 1 ? @"  execute out of the arena: PASS\n"
+                       : arc == 0 ? @"  execute out of the arena: ran but wrong value\n"
+                                  : [NSString stringWithFormat:@"  execute out of the arena: %s\n", asig ?: "fault"]];
+        [r appendString:@"\nJIT WORKS \u2713 — the emulator has its executable memory.\n"];
+        return r;
+    }
+
     // A) JIT26 brk handshake (the iOS 26/27 TXM path) — only if debugged, since
     //    a brk with no debugger script attached would kill the process.
     if (!dbg) {
         [r appendString:@"A JIT26 handshake: skipped (not debugged — enable JIT in StikDebug first)\n"];
-    } else {
+    } else if (_arenaImpl >= 0 && self.coreLinked) {
+        // A real arena is available but not up yet: prepare THAT rather than a
+        // throwaway probe region, so the one handshake we get is the one the
+        // emulator will actually use.
+        int rc = v3k_ios_jit_init(kV3KArenaBytes);
+        if (rc == V3K_JIT_NO_IMPL) {
+            _arenaImpl = -1;
+            [r appendString:@"A JIT arena: no implementation linked — falling back to a standalone probe\n"];
+        } else {
+            _arenaImpl = 1;
+            _jit = v3k_ios_jit_ready() ? V3KJITReady : V3KJITFailed;
+            [r appendFormat:@"A JIT arena init: %@ — %s\n",
+                v3k_ios_jit_ready() ? @"OK" : @"FAILED", v3k_ios_jit_status()];
+            if (v3k_ios_jit_ready()) {
+                const char *asig = NULL;
+                int arc = guarded_exec(v3k_ios_jit_rx(), &asig);
+                [r appendFormat:@"  rx=%p rw=%p  %lu MB\n", v3k_ios_jit_rx(), v3k_ios_jit_rw(),
+                    v3k_ios_jit_size() >> 20];
+                [r appendString: arc == 1 ? @"  execute out of the arena: PASS\n"
+                               : arc == 0 ? @"  execute out of the arena: ran but wrong value\n"
+                                          : [NSString stringWithFormat:@"  execute out of the arena: %s\n", asig ?: "fault"]];
+                [r appendString:@"\nJIT WORKS \u2713 — the emulator has its executable memory.\n"];
+                return r;
+            }
+            [r appendString:@"\nRe-enable JIT in StikDebug (universal.js attached) and relaunch Vita3K.\n"
+                             "The handshake only works once per attach, so a retry needs a fresh attach.\n"];
+            return r;
+        }
+    }
+    // Fall back to the standalone probe only when there is no real arena to
+    // prepare (UI-preview build, or no arena implementation linked).
+    BOOL useArena = self.coreLinked && _arenaImpl >= 0;
+    if (dbg && !useArena) {
         const char *why = "declined";
         void *rx = prepare_region_guarded(len, 8.0, &why, NO);
         if (!rx || rx == (void *)-1) {

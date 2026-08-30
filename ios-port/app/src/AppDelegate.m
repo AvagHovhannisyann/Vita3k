@@ -61,6 +61,21 @@
     return YES;
 }
 
+// The moment we come back from StikDebug is the ONLY moment the executable
+// arena can be reserved: the JIT26 handshake works exactly once per attach, and
+// only while the debugger is still there. So grab it here, automatically,
+// instead of relying on the user to remember a button. Idempotent and safe when
+// no debugger is attached (it just reports JIT unavailable).
+- (void)applicationDidBecomeActive:(UIApplication *)application {
+    Vita3KCore *core = Vita3KCore.shared;
+    if (core.jitArenaReady) return;               // already have it — never re-handshake
+    if (!core.processIsDebugged) return;          // nothing to talk to
+    [core prepareJITWithCompletion:^(BOOL ok, NSError *error) {
+        NSLog(@"[Vita3K] auto JIT arena: %@ (%@)", ok ? @"ready" : @"failed",
+              ok ? core.jitArenaStatus : (error.localizedDescription ?: @"unknown"));
+    }];
+}
+
 @end
 
 int main(int argc, char *argv[]) {

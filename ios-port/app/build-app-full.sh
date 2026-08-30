@@ -26,6 +26,16 @@ for m in "$HERE"/src/*.m; do
   OBJS+=("$o")
 done   # NOTE: src/*.c (CoreStub.c) deliberately not compiled — the real bridge provides those symbols.
 
+# The JIT-arena fallback goes into its own archive, linked LAST. A linker only
+# pulls an archive member to resolve a still-undefined symbol, so the core's
+# real v3k_ios_jit_* implementation always wins when it is present; if it is
+# absent the app links anyway and says so on screen instead of silently
+# pretending JIT is available. (A plain weak definition would NOT work here: it
+# satisfies the reference outright and the real one is never pulled in.)
+clang -target arm64-apple-ios14.0 -isysroot "$SDK" -Wall -O2 \
+      -c "$HERE/src/jitarena_stub.c" -o "$OUT/obj/jitarena_stub.o"
+llvm-ar rcs "$OUT/libjitarenastub.a" "$OUT/obj/jitarena_stub.o"
+
 MODULES="app audio camera codec compat config cpu ctrl display emuenv gdbstub glutil gxm http ime input io kernel lang mem module modules motion net ngs nids np overlay packages patch regmgr renderer rtc shader touch updater util vkutil"
 CORELIBS=(); for m in $MODULES; do CORELIBS+=("$CORE_LIB_DIR/lib$m.a"); done
 DEPLIBS=(); for f in "$DEPS"/*.a; do
@@ -48,6 +58,7 @@ clang++ -std=c++23 -stdlib=libc++ -isysroot "$SDK" -target arm64-apple-ios14.0 \
   -fuse-ld=lld -Wl,--error-limit=0 -Wl,-adhoc_codesign \
   "${OBJS[@]}" \
   "${EXTRALIBS[@]}" "${CORELIBS[@]}" "$FMT10" "${DEPLIBS[@]}" "$FMT10" \
+  "$OUT/libjitarenastub.a" \
   -framework Foundation -framework UIKit -framework Metal -framework QuartzCore \
   -framework CoreGraphics -framework AudioToolbox -framework AVFoundation \
   -framework GameController -framework CoreHaptics -framework CoreMedia \

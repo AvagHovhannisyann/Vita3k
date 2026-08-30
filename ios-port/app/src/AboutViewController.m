@@ -178,9 +178,14 @@
 }
 
 - (void)enableJITTapped:(UIButton *)sender {
-    NSError *e = nil;
-    BOOL ok = [[Vita3KCore shared] prepareJITWithError:&e];
+    sender.enabled = NO;
+    [[Vita3KCore shared] prepareJITWithCompletion:^(BOOL ok, NSError *e) {
+        sender.enabled = YES;
+        [self presentJITResult:ok error:e];
+    }];
+}
 
+- (void)presentJITResult:(BOOL)ok error:(NSError *)e {
     NSString *title = ok ? @"JIT Ready" : @"JIT Unavailable";
     NSString *message;
     if (ok) {

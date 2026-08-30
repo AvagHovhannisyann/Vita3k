@@ -708,10 +708,38 @@ typedef NS_ENUM(NSInteger, V3KGlyph) {
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    if (!self.didBoot) {
-        self.didBoot = YES;
-        [[Vita3KCore shared] bootTitleId:self.titleId inLayer:self.surface.layer];
+    if (self.didBoot) return;
+
+    Vita3KCore *core = Vita3KCore.shared;
+    // No executable arena means the recompiler would fault on the guest's first
+    // instruction. Say so plainly instead of showing a black screen.
+    if (core.coreLinked && !core.jitArenaReady) {
+        [core prepareJITWithCompletion:^(BOOL ok, NSError *error) {
+            if (ok) {
+                self.didBoot = YES;
+                [core bootTitleId:self.titleId inLayer:self.surface.layer];
+                return;
+            }
+            NSString *msg = error.localizedDescription.length
+                ? error.localizedDescription
+                : @"JIT memory is not available, so the recompiler cannot run.";
+            UIAlertController *a = [UIAlertController
+                alertControllerWithTitle:@"JIT Not Ready"
+                                 message:[msg stringByAppendingString:
+                    @"\n\nOpen StikDebug, enable JIT for Vita3K with universal.js attached, "
+                     "then launch the game again."]
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"Enable JIT" style:UIAlertActionStyleDefault
+                handler:^(UIAlertAction *_){ [core requestJITViaStikDebug]; }]];
+            [a addAction:[UIAlertAction actionWithTitle:@"Back" style:UIAlertActionStyleCancel
+                handler:^(UIAlertAction *_){ [self exitEmulator]; }]];
+            [self presentViewController:a animated:YES completion:nil];
+        }];
+        return;
     }
+
+    self.didBoot = YES;
+    [core bootTitleId:self.titleId inLayer:self.surface.layer];
 }
 
 - (void)exitEmulator {
