@@ -34,6 +34,11 @@ static v3k_aii_fn g_dyld_aii = NULL;
 #endif
 
 static char g_crashPath[1024];
+
+// Set by whichever reporter writes first. The signal handler opens with O_TRUNC,
+// which previously let a late, generic "abort() called" report erase the precise
+// findings written moments earlier by the C++ side.
+int v3k_report_already_written = 0;
 static struct sigaction g_old[8];
 static const int kSignals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP, SIGSYS };
 static const int kSignalCount = (int)(sizeof kSignals / sizeof kSignals[0]);
@@ -91,7 +96,8 @@ static void describeAddress(int fd, void *addr) {
 
 static void handler(int sig, siginfo_t *info, void *uap) {
     (void)uap;
-    int fd = open(g_crashPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(g_crashPath, O_WRONLY | O_CREAT |
+                  (v3k_report_already_written ? O_APPEND : O_TRUNC), 0644);
     if (fd >= 0) {
         w(fd, "Vita3K iOS crash report\n=======================\nbuild: ");
         w(fd, V3K_BUILD_ID);

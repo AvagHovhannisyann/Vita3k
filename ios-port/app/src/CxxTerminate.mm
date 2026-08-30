@@ -33,6 +33,7 @@ extern "C" const char *v3k_crash_log_path(void);
 // Non-zero until main() starts. Any C++ throw while this is set happened during
 // image load — exactly the window dyld complained about.
 extern "C" { int v3k_in_static_init = 1; }
+extern "C" int v3k_report_already_written;
 
 static std::terminate_handler g_prev = nullptr;
 
@@ -76,6 +77,7 @@ static void v3k_terminate() {
         w(fd, "\n(end)\n");
         fsync(fd);
         close(fd);
+        v3k_report_already_written = 1;
     }
     if (g_prev) g_prev();
     abort();
@@ -206,7 +208,15 @@ __attribute__((constructor(103))) static void v3k_probe_initializers(void) {
         }
         if (!threw) continue;
 
-        int fd = (path && *path) ? open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1;
+        // Write to a SEPARATE file. The signal handler opens crash.log with
+        // O_TRUNC, so aborting from here previously made it overwrite these
+        // findings with a generic "abort() called" report — destroying the very
+        // answer this probe exists to produce.
+        char initPath[1100];
+        snprintf(initPath, sizeof initPath, "%s", (path && *path) ? path : "");
+        char *slash = strrchr(initPath, '/');
+        if (slash) snprintf(slash + 1, sizeof initPath - (slash + 1 - initPath), "init-throw.log");
+        int fd = initPath[0] ? open(initPath, O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1;
         if (fd >= 0) {
             w(fd, "Vita3K iOS crash report\n=======================\nbuild: " V3K_BUILD_ID "\n\n");
             w(fd, "FOUND THE THROWING STATIC INITIALIZER\n\n");
@@ -239,7 +249,10 @@ __attribute__((constructor(103))) static void v3k_probe_initializers(void) {
             w(fd, "\n\n(end)\n");
             fsync(fd);
             close(fd);
+            v3k_report_already_written = 1;
         }
-        abort();   // diagnostic build: stop here rather than let dyld re-run the list
+        // _exit, not abort: abort raises SIGABRT, our own handler catches it and
+        // rewrites crash.log, and the findings above are lost. Leave quietly.
+        _exit(70);
     }
 }
