@@ -3,6 +3,7 @@
 #import <UIKit/UIKit.h>
 #import "Theme.h"
 #import "Vita3KCore.h"
+#import "CrashReporter.h"
 #import "GameLibraryViewController.h"
 #import "SettingsViewController.h"
 #import "AboutViewController.h"
@@ -17,6 +18,9 @@
 - (BOOL)application:(UIApplication *)application
     didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     [Vita3KCore.shared self];   // spin up the bridge + data tree early
+    // Install this before anything else can fault: on a device we cannot attach
+    // a debugger to, an unreported crash teaches us nothing.
+    V3KInstallCrashReporter(Vita3KCore.shared.dataRoot);
 
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
 

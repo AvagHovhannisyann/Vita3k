@@ -6,6 +6,7 @@
 #import "FirmwareInstallViewController.h"
 #import "ControllerMappingViewController.h"
 #import "JitDiagnosticsViewController.h"
+#import "LogViewerViewController.h"
 
 static NSString *const kPrefix = @"v3k.";
 
@@ -215,7 +216,11 @@ typedef NS_ENUM(NSInteger, V3KRowKind) {
         ctrl.symbol = @"gamecontroller.fill";
         V3KSettingRow *jit = [V3KSettingRow row:V3KRowDisclosure title:@"JIT Diagnostics"];
         jit.symbol = @"bolt.fill";
-        devs.rows = @[jit, fw, ctrl];
+        // The device is the only place this port can be tested, so the log and
+        // the last crash report have to be readable without a debugger.
+        V3KSettingRow *logs = [V3KSettingRow row:V3KRowDisclosure title:@"Logs & Crash Reports"];
+        logs.symbol = @"doc.text.magnifyingglass";
+        devs.rows = @[jit, logs, fw, ctrl];
     }
     [out addObject:devs];
 
@@ -521,6 +526,8 @@ static NSInteger V3KTagFor(NSInteger section, NSInteger row) {
         UIViewController *vc;
         if ([row.title isEqualToString:@"JIT Diagnostics"]) {
             vc = [JitDiagnosticsViewController new];
+        } else if ([row.title isEqualToString:@"Logs & Crash Reports"]) {
+            vc = [LogViewerViewController new];
         } else if ([row.title isEqualToString:@"Firmware"]) {
             vc = [FirmwareInstallViewController new];
         } else if ([row.title isEqualToString:@"Controllers"]) {
