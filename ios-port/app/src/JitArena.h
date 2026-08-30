@@ -24,6 +24,8 @@
 #ifndef V3K_JIT_ARENA_H
 #define V3K_JIT_ARENA_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -46,6 +48,17 @@ unsigned long v3k_ios_jit_used(void);    ///< bytes handed out so far
 void          v3k_ios_jit_flush(void);   ///< reset the bump allocator + icache
 /// Stable NUL-terminated one-liner for the UI (never NULL).
 const char   *v3k_ios_jit_status(void);
+
+// --- Core-internal: the slot allocator dynarmic's oaknut::CodeBlock calls ---
+// The UI never uses these; they are declared here so the fallback definitions
+// live beside the rest of the ABI. Each guest thread gets one slot out of the
+// single arena (Vita3K builds a recompiler per thread — see
+// ios-port/JIT_ARENA_DESIGN.md), with `size` bytes of executable memory at
+// *out_xptr and a writable alias of the same bytes at *out_wptr.
+/// Returns 0 on success, negative when the arena is absent or exhausted.
+int  v3k_ios_jit_slot_alloc(unsigned long size, uint32_t **out_wptr, uint32_t **out_xptr);
+/// Return a slot to the free list. `xptr` is the value from slot_alloc.
+void v3k_ios_jit_slot_free(uint32_t *xptr, unsigned long size);
 
 #ifdef __cplusplus
 }
