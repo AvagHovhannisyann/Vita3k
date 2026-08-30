@@ -31,8 +31,11 @@ SIGTRAP guard with an 8 s timeout and a legacy `brk #0x69` fallback.
 
 **Consequence for the emulator:** regions created *after* detach can never be
 made executable. dynarmic allocates its code cache on demand, which is
-incompatible with that. The JIT allocator must be reworked to a **single fixed,
-pre-prepared arena** allocated while StikDebug is attached (task #9).
+incompatible with that — so the JIT allocator has been reworked to a **single
+fixed, pre-prepared arena** taken while StikDebug is attached. That is done; see
+`JIT_ARENA_DESIGN.md`. The load-bearing detail is that it is one code cache per
+**guest thread**, not one per process, so the arena is sub-allocated into 4 MB
+per-thread slots (32 of them in 128 MB).
 
 ## Progress
 
@@ -42,7 +45,7 @@ pre-prepared arena** allocated while StikDebug is attached (task #9).
 | **dynarmic (ARM dynamic recompiler — the JIT core)** | ✅ **cross-compiles to `libdynarmic.a` (arm64 Mach-O, 119 objects)** — the hardest, riskiest piece builds |
 | oaknut ARM64 emitter | ✅ builds (bundled in dynarmic) |
 | Boost (header-only, for dynarmic) | ✅ isolated headers wired |
-| JIT allocator reworked for iOS 26/27 (JIT26 + pre-prepared arena) | ⬜ **the biggest remaining runtime risk** |
+| **JIT allocator reworked for iOS 26/27 (JIT26 + pre-prepared arena)** | ✅ **done** — `vita3k/ios/ios_jit_arena.{h,cpp}` + oaknut/dynarmic patches; per-thread slots; verified present in the linked binary. **Never run on a device.** |
 | **FFmpeg (avcodec/avformat/avutil/swscale/swresample)** | ✅ **cross-built from source, n6.1, H.264/AAC/MP3** (no iOS prebuilt exists — done the hard way) |
 | **OpenSSL 3.3.2 (libssl/libcrypto)** | ✅ built |
 | **libcurl 8.11.0** | ✅ built (Apple Secure Transport TLS, self-contained) |
@@ -56,8 +59,10 @@ pre-prepared arena** allocated while StikDebug is attached (task #9).
 | builtin SPIR-V shaders | ✅ reusable verbatim from APK |
 | **Dependency tree (all 28 libs)** | ✅ **COMPLETE — every Vita3K dependency cross-compiles for arm64-iOS** (staged in `/home/user/ios-deps`) |
 | **Vita3K core modules (per-module clang compile, not full CMake yet)** | ✅ **all 38 non-Qt/non-Android core modules compile clean to arm64 Mach-O** (plus `interface.cpp`/`performance.cpp` and 3 header-only interface libs), incl. **renderer** (Vulkan/MoltenVK + GL backends, `.mm` Metal-layer glue), **cpu** (dynarmic integration), gxm, kernel, mem, audio, ctrl, np, packages, touch, and all 216 `modules/` Sce* HLE handlers — 403 objects total. Archived to `.a` in `/home/user/ios-deps/lib/vita3k-core/`. Only `gui-qt` (Qt desktop UI) and `android/jni` (Android bridge) are unbuilt, both out of scope for iOS. See `ios-port/build-scripts/` for the compile driver and `ios-port/patches/` for the source diffs. |
+| Vulkan bring-up on iOS (static MoltenVK) | ✅ dispatcher seeded from the statically linked `vkGetInstanceProcAddr`; the `dlopen("libvulkan.dylib")` path that would have thrown on every device is gone |
+| On-device diagnostics (crash reporter + log viewer) | ✅ fatal signals and uncaught exceptions are written to `crash.log` before the process dies, classified against the arena; readable and shareable in-app |
 | Real top-level CMake iOS build (vs. per-module clang) | ⬜ next |
-| Headless "core boots" on device | ⬜ |
+| Headless "core boots" on device | ⬜ **the current unknown** |
 | **iOS front-end (touch UI, game loading, controls)** | 🟢 **builds & runs, feature-rich**: `Vita3K.ipa` — Library (real param.sfo titles, real VPK extraction), Game Detail (metadata, save data, play/delete), Settings, About, First-Run onboarding (JIT guide), Firmware install, Controller mapping (GameController), full on-screen Vita gamepad, Enable-JIT. 12 source files. Emulator core wires in behind the `Vita3KCore` bridge. |
 
 ## Reproduce
