@@ -11,6 +11,7 @@
 #import <mach-o/dyld_images.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
+#import <mach-o/getsect.h>
 #import <dlfcn.h>
 
 // Not public API, but present in libdyld on every Apple platform. dyld records
@@ -131,6 +132,39 @@ static void handler(int sig, siginfo_t *info, void *uap) {
                 w(fd, "  (could not read this binary's header)\n");
             }
             w(fd, "  images loaded in total: "); wdec(fd, (long long)loadedCount); w(fd, "\n");
+        }
+
+        // dyld4 stores its fatal message in a __crash_info section rather than in
+        // dyld_all_image_infos (which is why the previous probe printed nothing).
+        // This is the same annotation the real crash reporter reads to produce
+        // lines like "Symbol not found: _foo / Expected in: /path/lib". Scan every
+        // loaded image for one carrying a message.
+        w(fd, "\n\ncrash annotations:\n");
+        {
+            int found = 0;
+            uint32_t n = _dyld_image_count();
+            for (uint32_t i = 0; i < n; ++i) {
+                const struct mach_header *h = _dyld_get_image_header(i);
+                if (!h) continue;
+                const char *secs[] = { "__crash_info", "__crash_info" };
+                const char *segs[] = { "__DATA", "__DATA_DIRTY" };
+                for (int k = 0; k < 2; ++k) {
+                    unsigned long sz = 0;
+                    uint8_t *p = getsectiondata((const struct mach_header_64 *)h, segs[k], secs[k], &sz);
+                    if (!p || sz < 16) continue;
+                    // struct crashreporter_annotations_t: version, then message ptr
+                    uint64_t msgptr = 0;
+                    memcpy(&msgptr, p + 8, sizeof msgptr);
+                    if (!msgptr) continue;
+                    const char *msg = (const char *)(uintptr_t)msgptr;
+                    if (!msg || !*msg) continue;
+                    const char *name = _dyld_get_image_name(i);
+                    w(fd, "  "); w(fd, name ? name : "?"); w(fd, ":\n    ");
+                    w(fd, msg); w(fd, "\n");
+                    found = 1;
+                }
+            }
+            if (!found) w(fd, "  (none recorded)\n");
         }
 
         const struct dyld_all_image_infos *aii = g_dyld_aii ? g_dyld_aii() : NULL;
