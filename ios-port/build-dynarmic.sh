@@ -24,8 +24,29 @@ fi
 
 echo "==> fetch Vita3K's pinned dynarmic (with submodules) if absent"
 mkdir -p "$WORK"
+FRESH_CLONE=0
 if [ ! -d "$WORK/dynarmic/.git" ]; then
   git clone --recursive --depth 1 https://github.com/Vita3K/dynarmic "$WORK/dynarmic"
+  FRESH_CLONE=1
+fi
+
+# The iOS JIT-arena patch (task #9 / PORT_STATUS.md's "biggest remaining
+# runtime risk") makes oaknut::CodeBlock draw memory from
+# vita3k/ios/ios_jit_arena.cpp's pre-prepared arena instead of mmap'ing its
+# own, on iOS only -- every other platform is untouched. See
+# JIT_ARENA_DESIGN.md for the full rationale. Only apply it once: a
+# freshly cloned tree needs it; a $WORK/dynarmic left over from a previous
+# run of this script already has it (re-applying would fail with
+# "already applied" / reject noise, not silently double-patch).
+PATCH="$HERE/patches/0002-dynarmic-ios-jit-arena.patch"
+if [ "$FRESH_CLONE" = "1" ] && [ -f "$PATCH" ]; then
+  echo "==> applying iOS JIT-arena patch to the freshly cloned tree"
+  git -C "$WORK/dynarmic" apply --verbose "$PATCH"
+elif [ -f "$PATCH" ] && ! grep -q "v3k_ios_jit_slot_alloc" "$WORK/dynarmic/externals/oaknut/include/oaknut/code_block.hpp" 2>/dev/null; then
+  echo "==> applying iOS JIT-arena patch to the existing tree (was not yet applied)"
+  git -C "$WORK/dynarmic" apply --verbose "$PATCH"
+else
+  echo "==> iOS JIT-arena patch already applied (or patch file missing) -- skipping"
 fi
 
 echo "==> configure dynarmic for arm64-apple-ios (A32 frontend, no tests)"
@@ -44,3 +65,15 @@ PATH="$IOSBIN:$PATH" ninja dynarmic
 LIB="$WORK/dynarmic-ios-build/src/dynarmic/libdynarmic.a"
 echo "==> result:"; file "$LIB"
 echo "done -> $LIB"
+echo
+echo "NOTE: on iOS this library now has two undefined externs,"
+echo "  _v3k_ios_jit_slot_alloc / _v3k_ios_jit_slot_free,"
+echo "that only vita3k/ios/ios_jit_arena.cpp defines (see"
+echo "patches/new-files/vita3k/ios/ and JIT_ARENA_DESIGN.md). Nothing"
+echo "resolves them at this point -- that .cpp is compiled and linked"
+echo "separately, as part of the vita3k core / final app link, the same"
+echo "way vita3k_ios_bridge.cpp and ios_bridge_apple.mm already are (see"
+echo "ios-port/build-scripts/link_ios_core_final.sh). A link that never"
+echo "reaches that stage (e.g. archiving this .a alone) will not surface"
+echo "the missing symbols; the final app link will refuse to link"
+echo "without them."

@@ -1,0 +1,198 @@
+diff --git a/externals/oaknut/include/oaknut/code_block.hpp b/externals/oaknut/include/oaknut/code_block.hpp
+index bfa87d9..d322082 100644
+--- a/externals/oaknut/include/oaknut/code_block.hpp
++++ b/externals/oaknut/include/oaknut/code_block.hpp
+@@ -17,6 +17,32 @@
+ #    include <pthread.h>
+ #    include <sys/mman.h>
+ #    include <unistd.h>
++#    if TARGET_OS_IPHONE
++// On iOS 18.4+ (and unconditionally on 26/27, where TXM/SPTM enforcement
++// covers essentially all hardware) a sideloaded app cannot make its own
++// pages executable: mmap(PROT_EXEC) and mprotect(PROT_EXEC) both SIGBUS on
++// first execute even under CS_DEBUGGED, and MAP_JIT is EPERM without the
++// allow-jit entitlement (all measured on-device, iPadOS 27.0.0). The only
++// executable memory this process will ever have is a single arena prepared
++// once, up front, via StikDebug's JIT26 `brk #0xf00d` handshake -- see
++// vita3k/ios/ios_jit_arena.h for the full story. CodeBlock does not (and on
++// this platform, cannot) allocate its own memory; instead it draws a slot
++// from that arena.
++//
++// This declares, locally, the exact two-function ABI
++// vita3k/ios/ios_jit_arena.cpp implements. oaknut/dynarmic remain a
++// standalone-buildable external project with no header dependency on the
++// vita3k source tree -- only the vita3k-side final link needs to supply a
++// definition for these two symbols (which it always does on iOS; see
++// ios-port/build-scripts/). Keep this declaration byte-for-byte in sync
++// with the copy in vita3k/ios/ios_jit_arena.h: extern "C" linkage means a
++// mismatch here would not be a compile or link error, only a silent ABI
++// bug.
++extern "C" {
++int v3k_ios_jit_slot_alloc(unsigned long size, std::uint32_t** out_wptr, std::uint32_t** out_xptr);
++void v3k_ios_jit_slot_free(std::uint32_t* xptr, unsigned long size);
++}
++#    endif
+ #else
+ #    include <sys/mman.h>
+ #endif
+@@ -30,18 +56,43 @@ public:
+     {
+ #if defined(_WIN32)
+         m_memory = (std::uint32_t*)VirtualAlloc(nullptr, size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
++        m_write_memory = m_memory;
+ #elif defined(__APPLE__)
+ #    if TARGET_OS_IPHONE
+-        m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
++        // Draw a {writable alias, executable view} pair out of the single
++        // pre-prepared arena instead of calling mmap. m_memory keeps
++        // meaning "the address code executes at" (see ptr()/xptr() below;
++        // ExceptionHandler::Register and DumpDisassembly() both key off
++        // it and must see execution addresses, not write addresses), and
++        // m_write_memory is the separate alias CodeGenerator actually
++        // writes bytes through. If the arena was never prepared (not
++        // debugged) or has no size-byte slot left, this throws below like
++        // every other allocation failure on every other platform --
++        // callers that need iOS to fail *before* attempting a CPU context
++        // at all should check vita3k::ios_jit::Ready() first (see
++        // cpu/src/cpu.cpp's init_cpu()).
++        std::uint32_t* wmem = nullptr;
++        std::uint32_t* xmem = nullptr;
++        if (v3k_ios_jit_slot_alloc(static_cast<unsigned long>(size), &wmem, &xmem)) {
++            m_write_memory = wmem;
++            m_memory = xmem;
++        } else {
++            m_memory = nullptr;
++            m_write_memory = nullptr;
++        }
+ #    else
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
++        m_write_memory = m_memory;
+ #    endif
+ #elif defined(__NetBSD__)
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_MPROTECT(PROT_READ | PROT_WRITE | PROT_EXEC), MAP_ANON | MAP_PRIVATE, -1, 0);
++        m_write_memory = m_memory;
+ #elif defined(__OpenBSD__)
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
++        m_write_memory = m_memory;
+ #else
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
++        m_write_memory = m_memory;
+ #endif
+ 
+         if (m_memory == nullptr)
+@@ -55,6 +106,10 @@ public:
+ 
+ #if defined(_WIN32)
+         VirtualFree((void*)m_memory, 0, MEM_RELEASE);
++#elif defined(__APPLE__) && TARGET_OS_IPHONE
++        // Return the slot to the arena's free list; there is no mapping
++        // of our own to munmap.
++        v3k_ios_jit_slot_free(m_memory, static_cast<unsigned long>(m_size));
+ #else
+         munmap(m_memory, m_size);
+ #endif
+@@ -65,25 +120,53 @@ public:
+     CodeBlock(CodeBlock&&) = delete;
+     CodeBlock& operator=(CodeBlock&&) = delete;
+ 
++    // The address code actually executes at. On every platform except iOS
++    // this is also the only address the block is ever mapped at
++    // (wptr() == xptr() == ptr()); ExceptionHandler::Register and
++    // DumpDisassembly() rely on that identity and must keep using ptr().
+     std::uint32_t* ptr() const
+     {
+         return m_memory;
+     }
+ 
++    // The address CodeGenerator should actually write bytes through.
++    // Identical to ptr() everywhere except iOS, where it is the separate
++    // writable alias of the same physical pages.
++    std::uint32_t* wptr() const
++    {
++        return m_write_memory;
++    }
++
++    // Alias of ptr(), spelled to match wptr() at dual-pointer
++    // CodeGenerator construction sites (`{mem.wptr(), mem.xptr()}`).
++    std::uint32_t* xptr() const
++    {
++        return m_memory;
++    }
++
+     void protect()
+     {
+-#if defined(__APPLE__) && !TARGET_OS_IPHONE
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++        // No-op: the RX view of the iOS JIT arena is executable-only by
++        // construction (StikDebug's handshake never granted it write
++        // permission, and mprotect() on it would fail anyway -- that is
++        // the exact failure this whole module exists to route around).
++        // The RW alias used by unprotect()'s counterpart is, symmetrically,
++        // never executable. There is nothing to toggle.
++#elif defined(__APPLE__) && !TARGET_OS_IPHONE
+         pthread_jit_write_protect_np(1);
+-#elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
++#elif defined(__NetBSD__) || defined(__OpenBSD__)
+         mprotect(m_memory, m_size, PROT_READ | PROT_EXEC);
+ #endif
+     }
+ 
+     void unprotect()
+     {
+-#if defined(__APPLE__) && !TARGET_OS_IPHONE
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++        // No-op; see protect().
++#elif defined(__APPLE__) && !TARGET_OS_IPHONE
+         pthread_jit_write_protect_np(0);
+-#elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
++#elif defined(__NetBSD__) || defined(__OpenBSD__)
+         mprotect(m_memory, m_size, PROT_READ | PROT_WRITE);
+ #endif
+     }
+@@ -136,7 +219,8 @@ public:
+     }
+ 
+ protected:
+-    std::uint32_t* m_memory;
++    std::uint32_t* m_memory;        // == xptr(); the executable view / execution address
++    std::uint32_t* m_write_memory;  // == wptr(); == m_memory everywhere except iOS
+     std::size_t m_size = 0;
+ };
+ 
+diff --git a/src/dynarmic/backend/arm64/address_space.cpp b/src/dynarmic/backend/arm64/address_space.cpp
+index 2c7ae77..a4d3df7 100644
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -23,7 +23,13 @@ namespace Dynarmic::Backend::Arm64 {
+ AddressSpace::AddressSpace(size_t code_cache_size)
+         : code_cache_size(code_cache_size)
+         , mem(code_cache_size)
+-        , code(mem.ptr(), mem.ptr())
++        // {wptr, xptr}: identical on every platform except iOS, where mem
++        // is a dual mapping of a slot in the pre-prepared JIT arena (see
++        // oaknut/include/oaknut/code_block.hpp) -- writes go through
++        // wptr(), and every PC-relative/absolute address CodeGenerator
++        // computes (branch targets, ADRL, block entry points, ...) is
++        // measured from xptr(), the address the code actually runs at.
++        , code(mem.wptr(), mem.xptr())
+         , fastmem_manager(exception_handler) {
+     ASSERT_MSG(code_cache_size <= 128 * 1024 * 1024, "code_cache_size > 128 MiB not currently supported");
+ 
+@@ -136,7 +142,7 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
+     using namespace oaknut::util;
+ 
+     for (auto [ptr_offset, target] : block_info.relocations) {
+-        CodeGenerator c{mem.ptr(), mem.ptr()};
++        CodeGenerator c{mem.wptr(), mem.xptr()};
+         c.set_xptr(reinterpret_cast<u32*>(block_info.entry_point + ptr_offset));
+ 
+         switch (target) {
+@@ -276,7 +282,7 @@ void AddressSpace::LinkBlockLinks(const CodePtr entry_point, const CodePtr targe
+     using namespace oaknut::util;
+ 
+     for (auto [ptr_offset, type] : block_relocations_list) {
+-        CodeGenerator c{mem.ptr(), mem.ptr()};
++        CodeGenerator c{mem.wptr(), mem.xptr()};
+         c.set_xptr(reinterpret_cast<u32*>(entry_point + ptr_offset));
+ 
+         switch (type) {

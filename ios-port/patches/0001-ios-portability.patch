@@ -19,6 +19,125 @@ index c79877b..038c013 100644
  
          std::sort(modules.begin(), modules.end(), [](const auto &a, const auto &b) {
              if (a.second == b.second)
+diff --git a/vita3k/cpu/src/cpu.cpp b/vita3k/cpu/src/cpu.cpp
+index 715c654..b0dd48c 100644
+--- a/vita3k/cpu/src/cpu.cpp
++++ b/vita3k/cpu/src/cpu.cpp
+@@ -21,11 +21,20 @@
+ #include <cpu/impl/interface.h>
+ #include <cpu/state.h>
+ #include <mem/ptr.h>
++#include <util/log.h>
+ #include <util/types.h>
+ 
+ #include <memory>
++#include <new>
+ #include <string>
+ 
++#if defined(__APPLE__)
++#    include <TargetConditionals.h>
++#    if TARGET_OS_IPHONE
++#        include <ios/ios_jit_arena.h>
++#    endif
++#endif
++
+ static void delete_cpu_state(CPUState *state) {
+     delete state;
+ }
+@@ -47,7 +56,50 @@ CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, M
+         return CPUStatePtr();
+     }
+ 
+-    state->cpu = std::make_unique<DynarmicCPU>(state.get(), processor_id, cpu_opt);
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    // Every DynarmicCPU draws a fixed slot out of the single pre-prepared
++    // iOS JIT arena (see vita3k/ios/ios_jit_arena.h and
++    // dynarmic_cpu.cpp's make_jit()). If the arena was never readied --
++    // not debugged, StikDebug declined/faulted/timed out, or init() was
++    // simply never called yet -- refuse to create this CPU context rather
++    // than let dynarmic construct a CodeBlock that can only fault the
++    // first time the guest thread executes an instruction. The caller
++    // (kernel/src/thread.cpp) already treats a null CPUStatePtr as "this
++    // thread failed to start", the same outcome as the pre-existing
++    // disasm-init failure above.
++    if (!vita3k::ios_jit::Ready()) {
++        LOG_ERROR("iOS JIT arena not ready ({}); refusing to create a CPU context for thread {}",
++            vita3k::ios_jit::Status(), log_hex(thread_id));
++        return CPUStatePtr();
++    }
++#endif
++
++    // On iOS, DynarmicCPU's constructor can still fail even when the arena
++    // itself is ready: it draws one fixed-size slot from that arena per
++    // guest thread, and the arena has a finite number of slots (see
++    // ios_jit_arena.h's kDefaultSlotBytes comment) -- a game with more
++    // concurrently-JIT-ing threads than the arena has room for will
++    // exhaust it. oaknut::CodeBlock reports that exactly like every other
++    // platform reports a real allocation failure: by throwing
++    // std::bad_alloc from its constructor. Every other platform's
++    // effectively-unlimited virtual memory means that exception is not
++    // normally reachable there, so it was never caught; on iOS it is a
++    // real, expected outcome and must not be allowed to propagate past
++    // this function as an uncaught exception (which would std::terminate
++    // the whole process over one thread that could not get JIT memory).
++    try {
++        state->cpu = std::make_unique<DynarmicCPU>(state.get(), processor_id, cpu_opt);
++    } catch (const std::bad_alloc &) {
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++        LOG_ERROR("Out of iOS JIT arena slots creating CPU context for thread {} ({}/{} MB used) "
++                   "-- this guest program has more concurrently-JIT-compiling threads than the "
++                   "arena has room for; see ios_jit_arena.h's kDefaultSlotBytes",
++            log_hex(thread_id), vita3k::ios_jit::Used() >> 20, vita3k::ios_jit::Size() >> 20);
++#else
++        LOG_ERROR("Out of memory creating CPU context for thread {}", log_hex(thread_id));
++#endif
++        return CPUStatePtr();
++    }
+ 
+     return state;
+ }
+diff --git a/vita3k/cpu/src/dynarmic_cpu.cpp b/vita3k/cpu/src/dynarmic_cpu.cpp
+index 274d7f0..489f1e7 100644
+--- a/vita3k/cpu/src/dynarmic_cpu.cpp
++++ b/vita3k/cpu/src/dynarmic_cpu.cpp
+@@ -31,6 +31,13 @@
+ #include <optional>
+ #include <string>
+ 
++#if defined(__APPLE__)
++#    include <TargetConditionals.h>
++#    if TARGET_OS_IPHONE
++#        include <ios/ios_jit_arena.h>
++#    endif
++#endif
++
+ class ArmDynarmicCP15 : public Dynarmic::A32::Coprocessor {
+     uint32_t tpidruro;
+     uint32_t sctlr;
+@@ -349,6 +356,23 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
+     config.optimizations = cpu_opt ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
+     config.enable_cycle_counting = false;
+ 
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    // dynarmic's default code_cache_size (128 MiB, see
++    // dynarmic/interface/A32/config.h) is sized for one independent mmap
++    // per Dynarmic::A32::Jit, which is what every other platform does.
++    // On iOS every Jit instead draws a fixed slot out of the single
++    // pre-prepared arena (see vita3k/ios/ios_jit_arena.h) -- one per guest
++    // thread, since init_cpu() is called per SceKernelThread
++    // (kernel/src/thread.cpp) -- so this MUST be the slot size, not the
++    // desktop default, or the very first CodeBlock construction would ask
++    // for more than the whole arena. See kDefaultSlotBytes's own comment
++    // for what this trades away (a game with more concurrently-JITting
++    // threads than the arena has slots for will fail to create further
++    // CPU contexts; init_cpu() below catches that and refuses cleanly
++    // rather than crashing).
++    config.code_cache_size = vita3k::ios_jit::kDefaultSlotBytes;
++#endif
++
+     return std::make_unique<Dynarmic::A32::Jit>(config);
+ }
+ 
 diff --git a/vita3k/io/include/io/functions.h b/vita3k/io/include/io/functions.h
 index 40b522c..2f039f0 100644
 --- a/vita3k/io/include/io/functions.h
@@ -386,6 +505,59 @@ index 21157a2..0a68921 100644
      return (__bridge void *)((__bridge NSView *)nsview).layer;
  }
 +#endif
+diff --git a/vita3k/renderer/src/vulkan/renderer.cpp b/vita3k/renderer/src/vulkan/renderer.cpp
+index f4b6c44..0a59111 100644
+--- a/vita3k/renderer/src/vulkan/renderer.cpp
++++ b/vita3k/renderer/src/vulkan/renderer.cpp
+@@ -23,8 +23,19 @@
+ #include <renderer/functions.h>
+ #include <renderer/types.h>
+ #include <renderer/vulkan/functions.h>
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
+ #include <renderer/vulkan/state.h>
+ 
++#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
++// The Vulkan headers are included with VK_NO_PROTOTYPES, so nothing declares
++// the entry point that the statically linked MoltenVK exports. Declare it here,
++// at namespace scope (a linkage specification cannot appear inside a function).
++extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char *pName);
++#endif
++
+ #include <config/state.h>
+ #include <config/version.h>
+ #include <display/state.h>
+@@ -378,6 +389,15 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
+ 
+         if (!detect_patch_bcn(&texture_cache.support_dxt))
+             return false;
++#elif defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
++        // iOS: MoltenVK is linked statically into the app. vulkan-hpp's no-arg
++        // init() builds a vk::DynamicLoader, which dlopen()s libvulkan.dylib /
++        // libvulkan.1.dylib / /usr/local/lib / /opt/homebrew — none of which
++        // exist on a device — and then THROWS std::runtime_error("Failed to
++        // load vulkan library!"). Seed the dispatcher from the entry point the
++        // static library already exports instead. (The Vulkan headers are
++        // included with VK_NO_PROTOTYPES, so declare it ourselves.)
++        VULKAN_HPP_DEFAULT_DISPATCHER.init(&::vkGetInstanceProcAddr);
+ #else
+         VULKAN_HPP_DEFAULT_DISPATCHER.init();
+ #endif
+@@ -1685,6 +1705,12 @@ renderer::VulkanDeviceInfo renderer::enumerate_vulkan_devices(const std::string
+             return info;
+ 
+         dispatch.init(vk_get_instance_proc_addr);
++#elif defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
++        // Same as in VKState::create: there is no libvulkan dylib to dlopen on
++        // iOS, so seed from statically linked MoltenVK. (The try/catch around
++        // this would swallow the loader's exception and silently report no
++        // devices, which is worse than not working.)
++        dispatch.init(&::vkGetInstanceProcAddr);
+ #else
+         dispatch.init();
+ #endif
 diff --git a/vita3k/renderer/src/vulkan/screen_renderer.cpp b/vita3k/renderer/src/vulkan/screen_renderer.cpp
 index 5cb0277..017b49a 100644
 --- a/vita3k/renderer/src/vulkan/screen_renderer.cpp

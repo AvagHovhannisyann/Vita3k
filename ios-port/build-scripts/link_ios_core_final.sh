@@ -109,7 +109,25 @@ done
 #                       here). vita3k never calls the public tray/dialog
 #                       APIs itself; these dispatcher objects get pulled in
 #                       regardless.
+#   libiosjitarena.a    vita3k/ios/ios_jit_arena.cpp -- the single
+#                       pre-prepared iOS 26/27 JIT arena (see
+#                       JIT_ARENA_DESIGN.md and
+#                       patches/new-files/vita3k/ios/ios_jit_arena.{h,cpp}).
+#                       Defines v3k_ios_jit_init/ready/rx/rw/size/used/
+#                       flush/status (the ABI ios-port/app/src/JitArena.h
+#                       declares and Vita3KCore.m calls) plus the internal
+#                       v3k_ios_jit_slot_alloc/free pair that dynarmic's
+#                       rebuilt libdynarmic.a now references as undefined
+#                       externs (see 0002-dynarmic-ios-jit-arena.patch) --
+#                       must be listed before DEPLIBS/dynarmic below so
+#                       ld64.lld's left-to-right archive scan can resolve
+#                       them. If the front end links its own copy of these
+#                       symbols (e.g. via a stub archive for UI-preview
+#                       builds), make sure this one is scanned first, the
+#                       same "first definition wins" rule jitarena_stub.c's
+#                       own header comment describes.
 EXTRALIBS=(
+  "$EXTRA_LIB_DIR/libiosjitarena.a"
   "$EXTRA_LIB_DIR/libios_bridge.a"
   "$EXTRA_LIB_DIR/libvitainterface.a"
   "$EXTRA_LIB_DIR/libdlmalloc.a"

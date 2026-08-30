@@ -43,6 +43,10 @@ DEPLIBS=(); for f in "$DEPS"/*.a; do
   DEPLIBS+=("$f")
 done
 EXTRALIBS=(
+  # First: the JIT arena. dynarmic's oaknut::CodeBlock and the front-end both
+  # reference v3k_ios_jit_*, and this must resolve them before the fallback
+  # archive at the end of the link does.
+  "$EXTRA_LIB_DIR/libiosjitarena.a"
   "$EXTRA_LIB_DIR/libios_bridge.a"   "$EXTRA_LIB_DIR/libvitainterface.a"
   "$EXTRA_LIB_DIR/libdlmalloc.a"     "$EXTRA_LIB_DIR/libminiz.a"
   "$EXTRA_LIB_DIR/libatrac9.a"       "$EXTRA_LIB_DIR/libfat16.a"

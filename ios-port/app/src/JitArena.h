@@ -55,7 +55,11 @@ const char   *v3k_ios_jit_status(void);
 // single arena (Vita3K builds a recompiler per thread — see
 // ios-port/JIT_ARENA_DESIGN.md), with `size` bytes of executable memory at
 // *out_xptr and a writable alias of the same bytes at *out_wptr.
-/// Returns 0 on success, negative when the arena is absent or exhausted.
+/// NOTE the polarity, which is the opposite of v3k_ios_jit_init's: returns
+/// NONZERO on success (filling both out-pointers), and 0 when the arena was
+/// never readied or has no `size`-byte run left, leaving them untouched.
+/// vita3k/ios/ios_jit_arena.h is authoritative for this contract, and
+/// oaknut's code_block.hpp tests it as `if (v3k_ios_jit_slot_alloc(...))`.
 int  v3k_ios_jit_slot_alloc(unsigned long size, uint32_t **out_wptr, uint32_t **out_xptr);
 /// Return a slot to the free list. `xptr` is the value from slot_alloc.
 void v3k_ios_jit_slot_free(uint32_t *xptr, unsigned long size);

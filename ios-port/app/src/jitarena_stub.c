@@ -20,9 +20,8 @@ const char   *v3k_ios_jit_status(void)  { return "no arena implementation linked
 // oaknut::CodeBlock reports the failure and the thread does not start, which
 // surfaces as a clear error instead of a fault.
 int v3k_ios_jit_slot_alloc(unsigned long size, uint32_t **out_wptr, uint32_t **out_xptr) {
-    (void)size;
-    if (out_wptr) *out_wptr = 0;
-    if (out_xptr) *out_xptr = 0;
-    return V3K_JIT_NO_IMPL;
+    (void)size; (void)out_wptr; (void)out_xptr;
+    return 0;   // 0 = failure for THIS call (see the note in JitArena.h);
+                // the out-pointers are left untouched, per the contract.
 }
 void v3k_ios_jit_slot_free(uint32_t *xptr, unsigned long size) { (void)xptr; (void)size; }
