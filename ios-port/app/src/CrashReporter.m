@@ -9,6 +9,8 @@
 #import <pthread.h>
 #import <sys/stat.h>
 #import <mach-o/dyld_images.h>
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
 #import <dlfcn.h>
 
 // Not public API, but present in libdyld on every Apple platform. dyld records
@@ -95,8 +97,47 @@ static void handler(int sig, siginfo_t *info, void *uap) {
         w(fd, "\nJIT arena: ");
         w(fd, v3k_ios_jit_status());
 
-        // If the loader is what aborted, this is the whole answer.
+        // If the loader aborted, name the library it could not load.
+        //
+        // dyld4 (iOS 15+) no longer fills in dyld_all_image_infos' error fields,
+        // so asking it produced nothing. Determine it directly instead: walk THIS
+        // binary's own LC_LOAD_DYLIB commands — the libraries it declares it
+        // needs — and check each against the list of images actually loaded.
+        // Whatever is required but absent is what dyld died on.
+        w(fd, "\n\nrequired libraries:\n");
+        {
+            const struct mach_header_64 *mh =
+                (const struct mach_header_64 *)_dyld_get_image_header(0);
+            uint32_t loadedCount = _dyld_image_count();
+            if (mh && mh->magic == MH_MAGIC_64) {
+                const struct load_command *lc = (const struct load_command *)(mh + 1);
+                for (uint32_t i = 0; i < mh->ncmds; ++i) {
+                    if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB) {
+                        const struct dylib_command *dc = (const struct dylib_command *)lc;
+                        const char *path = (const char *)lc + dc->dylib.name.offset;
+                        int loaded = 0;
+                        for (uint32_t j = 0; j < loadedCount; ++j) {
+                            const char *n = _dyld_get_image_name(j);
+                            if (n && strcmp(n, path) == 0) { loaded = 1; break; }
+                        }
+                        w(fd, loaded ? "  [ok]      " : "  [MISSING] ");
+                        w(fd, path);
+                        if (lc->cmd == LC_LOAD_WEAK_DYLIB) w(fd, "  (weak)");
+                        w(fd, "\n");
+                    }
+                    lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+                }
+            } else {
+                w(fd, "  (could not read this binary's header)\n");
+            }
+            w(fd, "  images loaded in total: "); wdec(fd, (long long)loadedCount); w(fd, "\n");
+        }
+
         const struct dyld_all_image_infos *aii = g_dyld_aii ? g_dyld_aii() : NULL;
+        if (!g_dyld_aii) w(fd, "\ndyld info: _dyld_get_all_image_infos unavailable");
+        else if (!aii)   w(fd, "\ndyld info: null");
+        else if (!(aii->errorMessage && *aii->errorMessage) && !aii->errorKind)
+            w(fd, "\ndyld info: no error recorded (expected on dyld4)");
         if (aii) {
             if (aii->errorMessage && *aii->errorMessage) {
                 w(fd, "\n\ndyld error: "); w(fd, aii->errorMessage);
