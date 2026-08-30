@@ -1,0 +1,53 @@
+diff --git a/vita3k/renderer/src/vulkan/renderer.cpp b/vita3k/renderer/src/vulkan/renderer.cpp
+index f4b6c44..0a59111 100644
+--- a/vita3k/renderer/src/vulkan/renderer.cpp
++++ b/vita3k/renderer/src/vulkan/renderer.cpp
+@@ -23,8 +23,19 @@
+ #include <renderer/functions.h>
+ #include <renderer/types.h>
+ #include <renderer/vulkan/functions.h>
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
+ #include <renderer/vulkan/state.h>
+ 
++#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
++// The Vulkan headers are included with VK_NO_PROTOTYPES, so nothing declares
++// the entry point that the statically linked MoltenVK exports. Declare it here,
++// at namespace scope (a linkage specification cannot appear inside a function).
++extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char *pName);
++#endif
++
+ #include <config/state.h>
+ #include <config/version.h>
+ #include <display/state.h>
+@@ -378,6 +389,15 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
+ 
+         if (!detect_patch_bcn(&texture_cache.support_dxt))
+             return false;
++#elif defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
++        // iOS: MoltenVK is linked statically into the app. vulkan-hpp's no-arg
++        // init() builds a vk::DynamicLoader, which dlopen()s libvulkan.dylib /
++        // libvulkan.1.dylib / /usr/local/lib / /opt/homebrew — none of which
++        // exist on a device — and then THROWS std::runtime_error("Failed to
++        // load vulkan library!"). Seed the dispatcher from the entry point the
++        // static library already exports instead. (The Vulkan headers are
++        // included with VK_NO_PROTOTYPES, so declare it ourselves.)
++        VULKAN_HPP_DEFAULT_DISPATCHER.init(&::vkGetInstanceProcAddr);
+ #else
+         VULKAN_HPP_DEFAULT_DISPATCHER.init();
+ #endif
+@@ -1685,6 +1705,12 @@ renderer::VulkanDeviceInfo renderer::enumerate_vulkan_devices(const std::string
+             return info;
+ 
+         dispatch.init(vk_get_instance_proc_addr);
++#elif defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
++        // Same as in VKState::create: there is no libvulkan dylib to dlopen on
++        // iOS, so seed from statically linked MoltenVK. (The try/catch around
++        // this would swallow the loader's exception and silently report no
++        // devices, which is worse than not working.)
++        dispatch.init(&::vkGetInstanceProcAddr);
+ #else
+         dispatch.init();
+ #endif
