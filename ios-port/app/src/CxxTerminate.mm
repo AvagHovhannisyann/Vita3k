@@ -19,6 +19,10 @@
 #include <stdlib.h>
 #include <dlfcn.h>
 
+#ifndef V3K_BUILD_ID
+#define V3K_BUILD_ID "unstamped"
+#endif
+
 extern "C" const char *v3k_crash_log_path(void);
 
 // Non-zero until main() starts. Any C++ throw while this is set happened during
@@ -33,7 +37,7 @@ static void v3k_terminate() {
     const char *path = v3k_crash_log_path();
     int fd = (path && *path) ? open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1;
     if (fd >= 0) {
-        w(fd, "Vita3K iOS crash report\n=======================\n\n");
+        w(fd, "Vita3K iOS crash report\n=======================\nbuild: " V3K_BUILD_ID "\n\n");
         w(fd, "cause: uncaught C++ exception (std::terminate)\n"
               "  dyld reports this as \"c++ exception thrown in static initializer\"\n"
               "  when it happens while the app is still loading.\n\n");
@@ -84,7 +88,7 @@ extern "C" void __cxa_throw(void *thrown, std::type_info *tinfo, void (*dest)(vo
         const char *path = v3k_crash_log_path();
         int fd = (path && *path) ? open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1;
         if (fd >= 0) {
-            w(fd, "Vita3K iOS crash report\n=======================\n\n");
+            w(fd, "Vita3K iOS crash report\n=======================\nbuild: " V3K_BUILD_ID "\n\n");
             w(fd, "cause: C++ exception thrown during static initialization\n"
                   "  (caught at the throw itself, so the initializer is on the stack below)\n\n");
             w(fd, "exception type: ");

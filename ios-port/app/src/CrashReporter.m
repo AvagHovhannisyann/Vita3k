@@ -13,6 +13,7 @@
 #import <mach-o/loader.h>
 #import <mach-o/getsect.h>
 #import <dlfcn.h>
+#import <locale.h>
 
 // Not public API, but present in libdyld on every Apple platform. dyld records
 // exactly why it refused to load an image here, then aborts — and the message
@@ -28,6 +29,10 @@ static v3k_aii_fn g_dyld_aii = NULL;
 // A signal handler may only call async-signal-safe functions, so everything
 // below writes with write(2) and formats by hand. The path is resolved and
 // cached at install time for the same reason.
+#ifndef V3K_BUILD_ID
+#define V3K_BUILD_ID "unstamped"
+#endif
+
 static char g_crashPath[1024];
 static struct sigaction g_old[8];
 static const int kSignals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP, SIGSYS };
@@ -88,7 +93,9 @@ static void handler(int sig, siginfo_t *info, void *uap) {
     (void)uap;
     int fd = open(g_crashPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) {
-        w(fd, "Vita3K iOS crash report\n=======================\n\nsignal: ");
+        w(fd, "Vita3K iOS crash report\n=======================\nbuild: ");
+        w(fd, V3K_BUILD_ID);
+        w(fd, "\n\nsignal: ");
         w(fd, signame(sig));
         w(fd, "\ncode:   "); wdec(fd, info ? info->si_code : 0);
         w(fd, "\naddr:   "); whex(fd, info ? (unsigned long long)(uintptr_t)info->si_addr : 0ULL);
@@ -241,6 +248,8 @@ __attribute__((constructor(101))) static void v3k_install_crash_reporter_early(v
     mkdir(dir, 0755);                       // harmless if it already exists
     snprintf(g_crashPath, sizeof g_crashPath, "%s/crash.log", dir);
 
+    setlocale(LC_ALL, "C");   // cheap insurance: a bad/missing locale is a classic
+                              // "exception thrown in static initializer" on iOS
     g_dyld_aii = (v3k_aii_fn)dlsym(RTLD_DEFAULT, "_dyld_get_all_image_infos");
 
     static char altstack[SIGSTKSZ * 2];

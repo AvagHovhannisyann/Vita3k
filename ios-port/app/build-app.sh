@@ -3,6 +3,7 @@
 # the real iPhoneOS SDK + clang/lld. Ad-hoc signed with get-task-allow so
 # Sideloadly can install it and StikDebug can enable JIT.
 set -euo pipefail
+BUILD_ID="${BUILD_ID:-$(date -u +%Y%m%d-%H%M%S)}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -22,7 +23,7 @@ for m in "$HERE"/src/*.m; do
   o="$OUT/obj/$(basename "${m%.m}").o"
   echo "    CC $(basename "$m")"
   clang -target arm64-apple-ios14.0 -isysroot "$SDK" -fobjc-arc -fmodules \
-        -Wall -Wno-unused -O2 -I"$HERE/src" -c "$m" -o "$o"
+        -Wall -Wno-unused -O2 -DV3K_BUILD_ID=\"$BUILD_ID\" -I"$HERE/src" -c "$m" -o "$o"
   OBJS+=("$o")
 done
 # Objective-C++ sources (the std::terminate reporter needs the C++ ABI).
@@ -31,7 +32,7 @@ for mm in "$HERE"/src/*.mm; do
   o="$OUT/obj/$(basename "${mm%.mm}").o"
   echo "    CXX $(basename "$mm")"
   clang++ -target arm64-apple-ios14.0 -isysroot "$SDK" -std=c++17 -stdlib=libc++ \
-        -fobjc-arc -Wall -Wno-unused -O2 -I"$HERE/src" -c "$mm" -o "$o"
+        -fobjc-arc -Wall -Wno-unused -O2 -DV3K_BUILD_ID=\"$BUILD_ID\" -I"$HERE/src" -c "$mm" -o "$o"
   OBJS+=("$o")
 done
 # C sources (e.g. the core stub for UI-preview builds; omit when linking the real core)
