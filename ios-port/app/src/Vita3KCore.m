@@ -32,6 +32,9 @@ extern const char *vita3k_ios_version(void);
 extern int  vita3k_ios_boot(const char *title_id, void *metal_layer);
 extern void vita3k_ios_send_buttons(uint32_t mask);
 extern void vita3k_ios_shutdown(void);
+extern int  vita3k_ios_install_firmware(const char *pup_path,
+                                        void (*progress)(unsigned int, void *), void *ctx,
+                                        char *out_version, unsigned long out_cap);
 
 // The cross-toolchain doesn't ship compiler-rt's iOS builtins, so provide the
 // availability helper that `@available(...)` lowers to.
@@ -422,7 +425,59 @@ static unsigned long long dirSize(NSString *path) {
     [NSFileManager.defaultManager removeItemAtPath:dst error:nil];
     BOOL ok = [NSFileManager.defaultManager copyItemAtURL:url toURL:[NSURL fileURLWithPath:dst] error:error];
     if (scoped) [url stopAccessingSecurityScopedResource];
-    return ok;   // The core installs the staged PUP into vs0 on next boot.
+    return ok;   // Staged only — -installFirmwareAtURL:... does the real work.
+}
+
+// Trampoline for the C progress callback: `ctx` is the Objective-C block.
+static void firmwareProgressThunk(unsigned int pct, void *ctx) {
+    if (!ctx) return;
+    void (^blk)(double) = (__bridge void (^)(double))ctx;
+    blk(pct / 100.0);
+}
+
+- (void)installFirmwareAtURL:(NSURL *)url
+                    progress:(void (^)(double))progress
+                  completion:(void (^)(BOOL, NSString *, NSError *))completion {
+    void (^finish)(BOOL, NSString *, NSError *) = ^(BOOL ok, NSString *ver, NSError *e) {
+        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(ok, ver, e); });
+    };
+    NSError *stageErr = nil;
+    if (![self importFirmwareAtURL:url error:&stageErr]) {
+        finish(NO, nil, stageErr ?: [NSError errorWithDomain:@"Vita3K" code:20 userInfo:@{
+            NSLocalizedDescriptionKey: @"Could not copy that file into the emulator's storage."}]);
+        return;
+    }
+    NSString *staged = [[self.dataRoot stringByAppendingPathComponent:@"import"]
+                        stringByAppendingPathComponent:url.lastPathComponent];
+
+    if (!self.coreLinked) {
+        finish(NO, nil, [NSError errorWithDomain:@"Vita3K" code:21 userInfo:@{
+            NSLocalizedDescriptionKey: @"The emulator core is not linked into this build, so firmware "
+                                        "cannot be installed. The file has been saved for a later build."}]);
+        return;
+    }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        char version[64] = {0};
+        int rc = vita3k_ios_install_firmware(staged.fileSystemRepresentation,
+                                             progress ? firmwareProgressThunk : NULL,
+                                             progress ? (__bridge void *)progress : NULL,
+                                             version, sizeof version);
+        if (rc == 0) {
+            finish(YES, version[0] ? [NSString stringWithUTF8String:version] : nil, nil);
+            return;
+        }
+        NSString *why;
+        switch (rc) {
+            case -3:  why = @"The staged firmware file could not be found."; break;
+            case -4:  why = @"That file could not be decrypted or extracted. Make sure it is an "
+                             "official PS Vita firmware update (PSP2UPDAT.PUP) and downloaded in full."; break;
+            case -5:  why = @"The firmware extracted but reported no version, so it was rejected."; break;
+            default:  why = @"Firmware installation failed. See Settings > Logs & Crash Reports."; break;
+        }
+        finish(NO, nil, [NSError errorWithDomain:@"Vita3K" code:(22 - rc) userInfo:@{
+            NSLocalizedDescriptionKey: why}]);
+    });
 }
 
 - (NSArray<NSString *> *)saveDataPathsForTitle:(V3KTitle *)title {

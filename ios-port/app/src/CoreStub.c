@@ -9,3 +9,9 @@ const char *vita3k_ios_version(void) { return "front-end preview — core not li
 int  vita3k_ios_boot(const char *title_id, void *metal_layer) { (void)title_id; (void)metal_layer; return -1; }
 void vita3k_ios_send_buttons(uint32_t mask) { (void)mask; }
 void vita3k_ios_shutdown(void) {}
+int  vita3k_ios_install_firmware(const char *pup_path, void (*progress)(unsigned int, void *),
+                                 void *ctx, char *out_version, unsigned long out_cap) {
+    (void)pup_path; (void)progress; (void)ctx;
+    if (out_version && out_cap) out_version[0] = 0;
+    return -1;                                             // no core: nothing to install into
+}

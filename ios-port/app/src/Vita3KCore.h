@@ -101,8 +101,16 @@ extern NSNotificationName const V3KJITStateDidChangeNotification;
 - (void)installPackageAtURL:(NSURL *)url
                    progress:(void (^_Nullable)(double))progress
                  completion:(void (^)(BOOL ok, NSString *_Nullable titleId, NSError *_Nullable error))completion;
-/// Import a firmware PUP (staged into the data tree for the core to install).
+/// Copy a firmware PUP into the data tree. This only STAGES the file — call
+/// -installFirmwareAtURL:progress:completion: to actually install it.
 - (BOOL)importFirmwareAtURL:(NSURL *)url error:(NSError **_Nullable)error;
+/// Install a PS Vita firmware PUP into vs0/os0/sa0/pd0. Decrypting and
+/// extracting a PUP takes a while, so this runs on a background thread;
+/// `progress` is called 0..1 there and `completion` on the main queue.
+/// Most commercial titles cannot boot until this has succeeded.
+- (void)installFirmwareAtURL:(NSURL *)url
+                    progress:(void (^_Nullable)(double))progress
+                  completion:(void (^)(BOOL ok, NSString *_Nullable version, NSError *_Nullable error))completion;
 /// Delete an installed title.
 - (BOOL)deleteTitle:(V3KTitle *)title error:(NSError **_Nullable)error;
 

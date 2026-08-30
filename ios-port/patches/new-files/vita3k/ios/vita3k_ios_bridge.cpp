@@ -61,6 +61,7 @@
 #include <emuenv/app_launch_request.h>
 #include <emuenv/state.h>
 #include <modules/module_parent.h>
+#include <packages/functions.h>
 #include <renderer/frame_host.h>
 #include <renderer/functions.h>
 #include <util/exit_code.h>
@@ -70,6 +71,7 @@
 #include <SDL3/SDL.h>
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
@@ -153,6 +155,7 @@ struct BridgeState {
     std::unique_ptr<IOSFrameHost> frame_host;
     std::thread run_thread;
     std::atomic<bool> one_time_init_done{ false };
+    std::atomic<bool> paths_logging_done{ false };
 };
 
 BridgeState &bridge_state() {
@@ -166,8 +169,13 @@ BridgeState &bridge_state() {
 // apps list -- the iOS equivalent of
 // android/jni/native_bootstrap.cpp's initialize_session() +
 // prepare_frontend_runtime(). Must be called with bridge_state().mutex held.
-bool one_time_init_locked(BridgeState &state) {
-    if (state.one_time_init_done.load(std::memory_order_acquire))
+// Just the paths and logging: enough to install firmware or inspect the data
+// tree, without standing up a whole EmuEnvState. Firmware install must NOT
+// depend on the full init, because part of that init (loading users, scanning
+// apps) is what firmware is a prerequisite for -- requiring it would be a
+// chicken-and-egg. Must be called with bridge_state().mutex held.
+bool paths_logging_init_locked(BridgeState &state) {
+    if (state.paths_logging_done.load(std::memory_order_acquire))
         return true;
 
     char *data_root_c = ios_bridge_copy_documents_vita3k_path();
@@ -208,6 +216,18 @@ bool one_time_init_locked(BridgeState &state) {
 
     LOG_INFO("{}", window_title);
     LOG_INFO("iOS bridge: data root '{}'", data_root);
+
+    state.paths_logging_done.store(true, std::memory_order_release);
+    return true;
+}
+
+bool one_time_init_locked(BridgeState &state) {
+    if (state.one_time_init_done.load(std::memory_order_acquire))
+        return true;
+    if (!paths_logging_init_locked(state))
+        return false;
+
+    boost::system::error_code ec;
 
     if (!SDL_Init(SDL_INIT_AUDIO)) {
         LOG_ERROR("SDL_Init(SDL_INIT_AUDIO) failed: {}", SDL_GetError());
@@ -371,6 +391,60 @@ void vita3k_ios_send_buttons(uint32_t mask) {
     auto &kb = state.emuenv->ctrl.keyboard_state;
     kb.buttons = mask;
     kb.buttons_ext = mask;
+}
+
+// Install a PS Vita firmware PUP into vs0/os0/sa0/pd0 under the data root.
+//
+// Without this the front end could only ever COPY a PUP into Documents and
+// hope: nothing in the emulator ever picked it up, so vs0 stayed empty and
+// every commercial title would fail to boot on a missing module. Runs
+// synchronously (the caller runs it off the main thread) and reports progress
+// 0..100 through the callback so the UI can show a bar -- decrypting and
+// extracting a PUP takes a while on a phone.
+//
+// Returns 0 on success. `out_version` receives the installed firmware version
+// string (e.g. "3.60") when there is room for it.
+int vita3k_ios_install_firmware(const char *pup_path,
+                                void (*progress)(unsigned int, void *), void *ctx,
+                                char *out_version, unsigned long out_cap) {
+    if (out_version && out_cap)
+        out_version[0] = '\0';
+    if (!pup_path || !*pup_path)
+        return -1;
+
+    BridgeState &state = bridge_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!paths_logging_init_locked(state))
+        return -2;
+
+    const fs::path pup = fs_utils::utf8_to_path(std::string(pup_path));
+    boost::system::error_code ec;
+    if (!fs::exists(pup, ec)) {
+        LOG_ERROR("iOS bridge: firmware PUP not found at '{}'", pup);
+        return -3;
+    }
+
+    LOG_INFO("iOS bridge: installing firmware from '{}'", pup);
+    std::string version;
+    try {
+        version = install_pup(state.root_paths.get_vita_fs_path(), pup,
+            [progress, ctx](uint32_t pct) { if (progress) progress(pct, ctx); });
+    } catch (const std::exception &e) {
+        // A truncated or wrong-keyed PUP throws from deep inside the decrypt /
+        // FAT-extract path. Report it instead of taking the process down.
+        LOG_ERROR("iOS bridge: firmware install failed: {}", e.what());
+        return -4;
+    }
+
+    if (version.empty()) {
+        LOG_ERROR("iOS bridge: firmware install produced no version -- treating as failure");
+        return -5;
+    }
+    LOG_INFO("iOS bridge: firmware {} installed", version);
+    if (out_version && out_cap) {
+        std::snprintf(out_version, static_cast<size_t>(out_cap), "%s", version.c_str());
+    }
+    return 0;
 }
 
 void vita3k_ios_shutdown(void) {

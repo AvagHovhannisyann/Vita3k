@@ -297,32 +297,41 @@
         return;
     }
 
-    NSError *error = nil;
-    BOOL ok = [[Vita3KCore shared] importFirmwareAtURL:url error:&error];
-
-    [self refreshStatus];
-
-    NSString *title;
-    NSString *message;
-    if (ok) {
-        title = @"Firmware imported";
-        message = @"The firmware will be installed into the emulator on the next boot.";
-    } else {
-        title = @"Import failed";
-        message = error.localizedDescription.length
-            ? error.localizedDescription
-            : @"That file could not be imported as firmware. Make sure it is a "
-              @"PS Vita firmware update (PSP2UPDAT.PUP).";
-    }
-
-    UIAlertController *alert =
-        [UIAlertController alertControllerWithTitle:title
-                                            message:message
+    // Decrypting and extracting a PUP takes a while on a phone, so show a
+    // non-dismissable progress alert rather than freezing the screen.
+    UIAlertController *hud =
+        [UIAlertController alertControllerWithTitle:@"Installing firmware"
+                                            message:@"Extracting\u2026  0%"
                                      preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK"
-                                              style:UIAlertActionStyleDefault
-                                            handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+    [self presentViewController:hud animated:YES completion:nil];
+
+    [[Vita3KCore shared] installFirmwareAtURL:url
+        progress:^(double f) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                hud.message = [NSString stringWithFormat:@"Extracting\u2026  %d%%", (int)lround(f * 100)];
+            });
+        }
+        completion:^(BOOL ok, NSString *version, NSError *error) {
+            [self refreshStatus];
+            [hud dismissViewControllerAnimated:YES completion:^{
+                NSString *title = ok ? @"Firmware installed" : @"Install failed";
+                NSString *message = ok
+                    ? (version.length
+                        ? [NSString stringWithFormat:@"PS Vita firmware %@ is installed. Games can now load "
+                                                      "the system modules they need.", version]
+                        : @"The firmware is installed.")
+                    : (error.localizedDescription.length
+                        ? error.localizedDescription
+                        : @"That file could not be installed as firmware. Make sure it is a "
+                           "PS Vita firmware update (PSP2UPDAT.PUP).");
+                UIAlertController *alert =
+                    [UIAlertController alertControllerWithTitle:title message:message
+                                                 preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                          style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+            }];
+        }];
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
