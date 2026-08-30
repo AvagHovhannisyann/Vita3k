@@ -7,6 +7,7 @@
 #import <string.h>
 #import <stdlib.h>
 #import <pthread.h>
+#import <sys/stat.h>
 
 // A signal handler may only call async-signal-safe functions, so everything
 // below writes with write(2) and formats by hand. The path is resolved and
@@ -105,6 +106,39 @@ static void uncaught(NSException *ex) {
     for (NSString *line in ex.callStackSymbols) { w(fd, line.UTF8String ?: ""); w(fd, "\n"); }
     w(fd, "\n(end)\n");
     fsync(fd); close(fd);
+}
+
+// Install as early as the process allows.
+//
+// The reporter used to be installed from -application:didFinishLaunching..., i.e.
+// inside main(). That is too late for a whole class of failure: a crashing C++
+// static initializer, or a symbol dyld cannot bind, kills the process BEFORE
+// main() runs — which presents as a black screen and an instant exit with no
+// log written, and that is exactly what happened with an unresolved
+// transform_dis_main. A constructor with an early priority runs before most
+// other initializers, so those now leave a report behind too.
+//
+// The path is built with plain C rather than NSSearchPathForDirectoriesInDomains
+// because this runs during static init, when as little as possible should be
+// assumed about what is already initialised.
+__attribute__((constructor(101))) static void v3k_install_crash_reporter_early(void) {
+    const char *home = getenv("HOME");
+    if (!home || !*home) return;
+    char dir[900];
+    snprintf(dir, sizeof dir, "%s/Documents/vita3k", home);
+    mkdir(dir, 0755);                       // harmless if it already exists
+    snprintf(g_crashPath, sizeof g_crashPath, "%s/crash.log", dir);
+
+    static char altstack[SIGSTKSZ * 2];
+    stack_t ss = { .ss_sp = altstack, .ss_size = sizeof altstack, .ss_flags = 0 };
+    sigaltstack(&ss, NULL);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    for (int i = 0; i < kSignalCount; ++i) sigaction(kSignals[i], &sa, &g_old[i]);
 }
 
 void V3KInstallCrashReporter(NSString *directory) {

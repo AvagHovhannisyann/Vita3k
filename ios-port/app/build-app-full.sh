@@ -53,6 +53,7 @@ EXTRALIBS=(
   "$EXTRA_LIB_DIR/libSPIRV.a"        "$EXTRA_LIB_DIR/libosveccompat.a"
   "$EXTRA_LIB_DIR/libcubeb.a"        "$EXTRA_LIB_DIR/libyaml-cpp-fixed.a"
   "$EXTRA_LIB_DIR/libgladstub.a"     "$EXTRA_LIB_DIR/libpsvpfs.a"
+  "$EXTRA_LIB_DIR/libsubstitute.a"
   "$EXTRA_LIB_DIR/libsdlioscompat.a"
 )
 FMT10="$EXTRA_LIB_DIR/libfmt10compat.a"
@@ -70,7 +71,6 @@ clang++ -std=c++23 -stdlib=libc++ -isysroot "$SDK" -target arm64-apple-ios14.0 \
   -framework IOSurface -framework CoreBluetooth -framework CoreMotion \
   -framework OpenGLES -framework VideoToolbox -framework UniformTypeIdentifiers \
   -Wl,-U,'_OBJC_CLASS_$_MTLResidencySetDescriptor' \
-  -Wl,-U,_transform_dis_main \
   -lz -lc++ -liconv -lcompression -lbz2 \
   -o "$OUT/Vita3K"
 
