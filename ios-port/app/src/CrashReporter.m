@@ -112,34 +112,13 @@ static void handler(int sig, siginfo_t *info, void *uap) {
         // binary's own LC_LOAD_DYLIB commands — the libraries it declares it
         // needs — and check each against the list of images actually loaded.
         // Whatever is required but absent is what dyld died on.
-        w(fd, "\n\nrequired libraries:\n");
-        {
-            const struct mach_header_64 *mh =
-                (const struct mach_header_64 *)_dyld_get_image_header(0);
-            uint32_t loadedCount = _dyld_image_count();
-            if (mh && mh->magic == MH_MAGIC_64) {
-                const struct load_command *lc = (const struct load_command *)(mh + 1);
-                for (uint32_t i = 0; i < mh->ncmds; ++i) {
-                    if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB) {
-                        const struct dylib_command *dc = (const struct dylib_command *)lc;
-                        const char *path = (const char *)lc + dc->dylib.name.offset;
-                        int loaded = 0;
-                        for (uint32_t j = 0; j < loadedCount; ++j) {
-                            const char *n = _dyld_get_image_name(j);
-                            if (n && strcmp(n, path) == 0) { loaded = 1; break; }
-                        }
-                        w(fd, loaded ? "  [ok]      " : "  [MISSING] ");
-                        w(fd, path);
-                        if (lc->cmd == LC_LOAD_WEAK_DYLIB) w(fd, "  (weak)");
-                        w(fd, "\n");
-                    }
-                    lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-                }
-            } else {
-                w(fd, "  (could not read this binary's header)\n");
-            }
-            w(fd, "  images loaded in total: "); wdec(fd, (long long)loadedCount); w(fd, "\n");
-        }
+        // The required-library enumeration used to run here. It answered its
+        // question conclusively — every library resolved [ok] across several
+        // builds — and then became a liability: it is roughly 17,000 dyld
+        // lookups performed from inside a signal handler, it faulted partway,
+        // and it truncated the report before the crash annotation (dyld's own
+        // statement of the cause) could be written. Removed so the useful part
+        // always survives. Re-add it only if a missing library is suspected again.
 
         // dyld4 stores its fatal message in a __crash_info section rather than in
         // dyld_all_image_infos (which is why the previous probe printed nothing).
