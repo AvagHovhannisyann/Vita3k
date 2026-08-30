@@ -21,6 +21,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) unsigned long long sizeBytes;
 @end
 
+typedef NS_ENUM(NSInteger, V3KTouchPhase) {
+    V3KTouchDown = 0,
+    V3KTouchMove = 1,
+    V3KTouchUp   = 2,
+};
+
 typedef NS_ENUM(NSInteger, V3KJITState) {
     V3KJITUnknown = 0,
     V3KJITUnavailable,     // not debugged / StikDebug not attached
@@ -126,7 +132,17 @@ extern NSNotificationName const V3KJITStateDidChangeNotification;
 - (void)sendButtons:(uint32_t)pressedMask;
 - (void)sendLeftStickX:(float)x y:(float)y;
 - (void)sendRightStickX:(float)x y:(float)y;
+/// Single-finger convenience, kept for simple callers. Maps onto finger 0.
 - (void)sendTouchFront:(CGPoint)normalizedPoint down:(BOOL)down;
+/// Deliver one finger of a multi-touch sequence. `fingerId` must be stable for
+/// the life of that finger; `normalizedPoint` is 0..1 across the WHOLE drawable
+/// (the core maps drawable -> viewport -> Vita panel itself, so passing
+/// viewport-relative coordinates would double-correct). The Vita's front panel
+/// tracks up to 6 fingers, the rear 4.
+- (void)sendTouchFinger:(uint64_t)fingerId at:(CGPoint)normalizedPoint phase:(V3KTouchPhase)phase;
+/// Route subsequent touches to the rear panel instead of the front. Several
+/// games bind actions to the rear touchpad that have no other input route.
+- (void)setRearTouchPanel:(BOOL)rear;
 /// Stop the running title.
 - (void)shutdown;
 

@@ -62,6 +62,8 @@
 #include <emuenv/state.h>
 #include <modules/module_parent.h>
 #include <packages/functions.h>
+#include <touch/functions.h>
+#include <touch/state.h>
 #include <renderer/frame_host.h>
 #include <renderer/functions.h>
 #include <util/exit_code.h>
@@ -445,6 +447,68 @@ int vita3k_ios_install_firmware(const char *pup_path,
         std::snprintf(out_version, static_cast<size_t>(out_cap), "%s", version.c_str());
     }
     return 0;
+}
+
+// Analog sticks. Values are -1..1 with +y down, matching how the on-screen
+// sticks report and how SceCtrl encodes them (ctrl.cpp's float_to_byte maps
+// -1..1 onto 0..255 with 0x80 centre). These ride the same virtual-keyboard
+// seam as the buttons: ctrl.cpp's apply_keyboard() adds keyboard_state.axes
+// into the polled axes every frame whether or not an SDL gamepad exists.
+void vita3k_ios_send_analog(float lx, float ly, float rx, float ry) {
+    BridgeState &state = bridge_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.emuenv)
+        return;
+    const auto clamp1 = [](float v) { return v < -1.f ? -1.f : (v > 1.f ? 1.f : v); };
+    std::lock_guard<std::mutex> ctrl_lock(state.emuenv->ctrl.mutex);
+    auto &kb = state.emuenv->ctrl.keyboard_state;
+    kb.axes[0] = clamp1(lx);
+    kb.axes[1] = clamp1(ly);
+    kb.axes[2] = clamp1(rx);
+    kb.axes[3] = clamp1(ry);
+}
+
+// Front/rear touchscreen. `nx`/`ny` are normalised to the WHOLE drawable, not
+// to the game viewport -- touch.cpp's recover_touch_events() does the
+// viewport->Vita-panel mapping itself, so passing viewport-relative
+// coordinates here would double-correct. `phase`: 0 = down, 1 = move, 2 = up.
+//
+// Note on synchronisation: TouchState carries no mutex, and the emulation
+// thread reads finger_buffer/finger_count during vsync without one. On other
+// platforms these arrive as SDL events drained on that same thread, so the
+// question does not come up; here the UI thread writes them. The bridge mutex
+// below serialises producers, but a concurrent read on the emulation thread is
+// still possible. It is bounded and benign -- the buffer is a fixed 8 entries
+// and finger_count never exceeds it, so the worst case is one frame of stale
+// or duplicated touch data, never an out-of-bounds access. Called out rather
+// than papered over.
+void vita3k_ios_send_touch(unsigned long long finger_id, float nx, float ny, int phase) {
+    BridgeState &state = bridge_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.emuenv)
+        return;
+
+    SDL_TouchFingerEvent ev{};
+    ev.type = (phase == 0) ? SDL_EVENT_FINGER_DOWN
+            : (phase == 2) ? SDL_EVENT_FINGER_UP
+                           : SDL_EVENT_FINGER_MOTION;
+    ev.fingerID = static_cast<SDL_FingerID>(finger_id);
+    ev.x = nx;
+    ev.y = ny;
+    ev.pressure = 1.0f;
+
+    state.emuenv->touch.renderer_focused = true;
+    handle_touch_event(state.emuenv->touch, ev);
+}
+
+// Switch which Vita panel the touches land on: 0 = front, 1 = rear. Several
+// games map actions to the rear panel that have no other input route.
+void vita3k_ios_set_touch_panel(int rear) {
+    BridgeState &state = bridge_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.emuenv)
+        return;
+    state.emuenv->touch.touchscreen_port = rear ? SCE_TOUCH_PORT_BACK : SCE_TOUCH_PORT_FRONT;
 }
 
 void vita3k_ios_shutdown(void) {

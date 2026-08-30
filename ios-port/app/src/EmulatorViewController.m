@@ -427,6 +427,8 @@ typedef NS_ENUM(NSInteger, V3KGlyph) {
     NSArray<V3KGamepadButton *> *_buttons;   // face + shoulders + start/select
     uint32_t _buttonBits;   // discrete buttons
     uint32_t _dpadBits;     // d-pad directions
+    NSMutableDictionary<NSValue *, NSNumber *> *_touchIds;  // UITouch -> stable finger id
+    uint64_t   _nextTouchId;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -610,27 +612,51 @@ typedef NS_ENUM(NSInteger, V3KGlyph) {
     return hit;
 }
 
-- (void)forwardFront:(NSSet<UITouch *> *)touches down:(BOOL)down {
-    UITouch *t = touches.anyObject;
-    if (!t) return;
-    CGPoint p = [t locationInView:self];
-    CGFloat nx = self.bounds.size.width  > 0 ? p.x / self.bounds.size.width  : 0.0;
-    CGFloat ny = self.bounds.size.height > 0 ? p.y / self.bounds.size.height : 0.0;
-    nx = MAX(0.0, MIN(1.0, nx));
-    ny = MAX(0.0, MIN(1.0, ny));
-    [[Vita3KCore shared] sendTouchFront:CGPointMake(nx, ny) down:down];
+// The Vita's front panel tracks up to 6 simultaneous fingers, and plenty of
+// games need more than one (pinch, two-thumb aiming, the rear panel's
+// multi-finger gestures). So forward every finger with a stable id rather than
+// collapsing the set to touches.anyObject the way the first cut did.
+//
+// UITouch objects are the identity: the same pointer persists for the life of
+// one finger. Map each to a small integer, and release the mapping when the
+// finger lifts so ids get reused instead of growing without bound.
+- (uint64_t)idForTouch:(UITouch *)t {
+    if (!_touchIds) _touchIds = [NSMutableDictionary dictionary];
+    // valueWithNonretainedObject boxes the pointer without retaining it and
+    // compares by pointer identity — exactly the semantics UITouch wants, and
+    // it keeps the whole thing inside ARC with no bridged casts.
+    NSValue *key = [NSValue valueWithNonretainedObject:t];
+    NSNumber *existing = _touchIds[key];
+    if (existing) return existing.unsignedLongLongValue;
+    uint64_t assigned = ++_nextTouchId;                  // never 0: 0 means "absent"
+    _touchIds[key] = @(assigned);
+    return assigned;
+}
+
+- (void)forwardTouches:(NSSet<UITouch *> *)touches phase:(V3KTouchPhase)phase {
+    const CGFloat w = self.bounds.size.width, h = self.bounds.size.height;
+    if (w <= 0 || h <= 0) return;
+    for (UITouch *t in touches) {
+        CGPoint p = [t locationInView:self];
+        CGPoint n = CGPointMake(MAX(0.0, MIN(1.0, p.x / w)), MAX(0.0, MIN(1.0, p.y / h)));
+        uint64_t fid = [self idForTouch:t];
+        [[Vita3KCore shared] sendTouchFinger:fid at:n phase:phase];
+        if (phase == V3KTouchUp) [_touchIds removeObjectForKey:[NSValue valueWithNonretainedObject:t]];
+    }
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self forwardFront:touches down:YES];
+    [self forwardTouches:touches phase:V3KTouchDown];
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self forwardFront:touches down:YES];
+    [self forwardTouches:touches phase:V3KTouchMove];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self forwardFront:touches down:NO];
+    [self forwardTouches:touches phase:V3KTouchUp];
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self forwardFront:touches down:NO];
+    // A cancelled touch must still be lifted, or the core keeps a phantom
+    // finger pressed for the rest of the session.
+    [self forwardTouches:touches phase:V3KTouchUp];
 }
 
 @end

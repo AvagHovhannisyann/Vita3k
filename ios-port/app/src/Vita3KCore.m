@@ -31,6 +31,9 @@ extern int  vita3k_ios_present(void);
 extern const char *vita3k_ios_version(void);
 extern int  vita3k_ios_boot(const char *title_id, void *metal_layer);
 extern void vita3k_ios_send_buttons(uint32_t mask);
+extern void vita3k_ios_send_analog(float lx, float ly, float rx, float ry);
+extern void vita3k_ios_send_touch(unsigned long long finger_id, float nx, float ny, int phase);
+extern void vita3k_ios_set_touch_panel(int rear);
 extern void vita3k_ios_shutdown(void);
 extern int  vita3k_ios_install_firmware(const char *pup_path,
                                         void (*progress)(unsigned int, void *), void *ctx,
@@ -107,7 +110,8 @@ static const unsigned long kV3KArenaBytes = 128ul << 20;
 
 @implementation V3KTitle @end
 
-@interface Vita3KCore () { V3KJITState _jit; int _arenaImpl; }  // _arenaImpl: 0 unknown, 1 real, -1 stub
+@interface Vita3KCore () { V3KJITState _jit; int _arenaImpl;
+    float _lx, _ly, _rx, _ry; BOOL _touch0Down; }  // _arenaImpl: 0 unknown, 1 real, -1 stub
 - (BOOL)legacyProbeWithError:(NSError **)error;
 @end
 @interface Vita3KCore ()
@@ -514,9 +518,34 @@ static void firmwareProgressThunk(unsigned int pct, void *ctx) {
     vita3k_ios_boot(titleId.UTF8String, (__bridge void *)layer);
 }
 - (void)sendButtons:(uint32_t)mask { vita3k_ios_send_buttons(mask); }
-- (void)sendLeftStickX:(float)x y:(float)y {}
-- (void)sendRightStickX:(float)x y:(float)y {}
-- (void)sendTouchFront:(CGPoint)p down:(BOOL)down {}
+// The core takes all four axes at once, so hold the last value of each stick
+// and resend the pair whenever either moves.
+- (void)sendLeftStickX:(float)x y:(float)y {
+    _lx = x; _ly = y;
+    vita3k_ios_send_analog(_lx, _ly, _rx, _ry);
+}
+- (void)sendRightStickX:(float)x y:(float)y {
+    _rx = x; _ry = y;
+    vita3k_ios_send_analog(_lx, _ly, _rx, _ry);
+}
+
+- (void)sendTouchFinger:(uint64_t)fingerId at:(CGPoint)p phase:(V3KTouchPhase)phase {
+    vita3k_ios_send_touch((unsigned long long)fingerId, (float)p.x, (float)p.y, (int)phase);
+}
+
+- (void)sendTouchFront:(CGPoint)p down:(BOOL)down {
+    // Single-finger callers: synthesise down/move/up on finger 0 so the core
+    // sees a well-formed sequence rather than repeated downs.
+    if (down) {
+        [self sendTouchFinger:0 at:p phase:_touch0Down ? V3KTouchMove : V3KTouchDown];
+        _touch0Down = YES;
+    } else if (_touch0Down) {
+        [self sendTouchFinger:0 at:p phase:V3KTouchUp];
+        _touch0Down = NO;
+    }
+}
+
+- (void)setRearTouchPanel:(BOOL)rear { vita3k_ios_set_touch_panel(rear ? 1 : 0); }
 - (void)shutdown { vita3k_ios_shutdown(); }
 
 

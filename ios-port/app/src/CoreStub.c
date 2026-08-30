@@ -8,6 +8,11 @@ int vita3k_ios_present(void) { return 0; }                 // 0 = core not linke
 const char *vita3k_ios_version(void) { return "front-end preview — core not linked"; }
 int  vita3k_ios_boot(const char *title_id, void *metal_layer) { (void)title_id; (void)metal_layer; return -1; }
 void vita3k_ios_send_buttons(uint32_t mask) { (void)mask; }
+void vita3k_ios_send_analog(float lx, float ly, float rx, float ry) { (void)lx; (void)ly; (void)rx; (void)ry; }
+void vita3k_ios_send_touch(unsigned long long id, float nx, float ny, int phase) {
+    (void)id; (void)nx; (void)ny; (void)phase;
+}
+void vita3k_ios_set_touch_panel(int rear) { (void)rear; }
 void vita3k_ios_shutdown(void) {}
 int  vita3k_ios_install_firmware(const char *pup_path, void (*progress)(unsigned int, void *),
                                  void *ctx, char *out_version, unsigned long out_cap) {
