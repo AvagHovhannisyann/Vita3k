@@ -41,6 +41,8 @@ extern int  vita3k_ios_install_package(const char *archive_path,
                                        char *out_category, unsigned long cat_cap);
 extern int  vita3k_ios_install_folder(const char *folder_path);
 extern int  vita3k_ios_rescan_apps(void);
+extern int  vita3k_ios_install_pkg(const char *pkg_path, const char *zrif,
+                                   void (*progress)(unsigned int, void *), void *ctx);
 extern void vita3k_ios_shutdown(void);
 extern int  vita3k_ios_install_firmware(const char *pup_path,
                                         void (*progress)(unsigned int, void *), void *ctx,
@@ -433,6 +435,28 @@ static unsigned long long dirSize(NSString *path) {
                 if (error) *error = [self installErrorForCode:rc folder:YES];
                 return NO;
             }
+            // An encrypted .pkg is not an archive and cannot be installed
+            // without its zRIF licence key, so it takes a separate route.
+            if ([url.pathExtension caseInsensitiveCompare:@"pkg"] == NSOrderedSame) {
+                NSString *key = self.pendingZRIF;
+                if (key.length == 0) {
+                    if (error) *error = [NSError errorWithDomain:@"Vita3K" code:50 userInfo:@{
+                        NSLocalizedDescriptionKey: @"This .pkg is encrypted and needs its zRIF licence key.",
+                        @"V3KNeedsZRIF": @YES}];
+                    return NO;
+                }
+                int prc = vita3k_ios_install_pkg(url.path.fileSystemRepresentation, key.UTF8String,
+                                                 progress ? packageProgressThunk : NULL,
+                                                 progress ? (__bridge void *)progress : NULL);
+                // One key belongs to one package. Clear it either way, so a
+                // second .pkg cannot silently inherit the previous title's key
+                // and fail with a confusing "cannot decrypt".
+                self.pendingZRIF = nil;
+                if (prc == 0) return YES;
+                if (error) *error = [self installErrorForCode:prc folder:NO];
+                return NO;
+            }
+
             char tid[32] = {0}, title[256] = {0}, cat[16] = {0};
             int rc = vita3k_ios_install_package(url.path.fileSystemRepresentation,
                                                 progress ? packageProgressThunk : NULL,
@@ -492,6 +516,7 @@ static unsigned long long dirSize(NSString *path) {
         case -3: why = folder ? @"That is not a folder." : @"The file could not be found."; break;
         case -4: why = @"The installer failed while reading that file. If it is an encrypted .pkg, "
                         "this build cannot decrypt it — see Logs & Crash Reports."; break;
+        case -6: why = @"That .pkg is encrypted and needs its zRIF licence key."; break;
         case -5: why = @"Nothing in that package installed. It may be an unsupported format, a Vitamin "
                         "dump, or encrypted content this build cannot decrypt."; break;
         default: why = @"The package could not be installed. See Settings > Logs & Crash Reports."; break;

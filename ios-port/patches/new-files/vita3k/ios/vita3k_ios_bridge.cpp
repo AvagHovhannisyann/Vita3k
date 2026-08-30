@@ -63,6 +63,7 @@
 #include <modules/module_parent.h>
 #include <archive.h>
 #include <packages/functions.h>
+#include <packages/pkg.h>
 #include <touch/functions.h>
 #include <touch/state.h>
 #include <renderer/frame_host.h>
@@ -595,6 +596,56 @@ int vita3k_ios_install_package(const char *archive_path,
     if (!app::scan_apps(*state.emuenv))
         LOG_ERROR("iOS bridge: apps rescan after install failed");
     return ok_count;
+}
+
+// Install an encrypted .pkg using a zRIF license key.
+//
+// The decryption this depends on (psvpfsparser's execute(), reached through
+// decrypt_install_nonpdrm) only became real when psvpfstools was cross-compiled
+// for iOS -- before that both it and the zRIF decoder were allowed-undefined at
+// link time and would have been fatal at runtime if anything called them.
+//
+// Returns 0 on success, negative on failure.
+int vita3k_ios_install_pkg(const char *pkg_path, const char *zrif,
+                           void (*progress)(unsigned int, void *), void *ctx) {
+    if (!pkg_path || !*pkg_path)
+        return -1;
+    if (!zrif || !*zrif)
+        return -6;                       // a .pkg without a key cannot be decrypted
+
+    BridgeState &state = bridge_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!one_time_init_locked(state) || !state.emuenv)
+        return -2;
+
+    const fs::path pkg = fs_utils::utf8_to_path(std::string(pkg_path));
+    boost::system::error_code ec;
+    if (!fs::exists(pkg, ec)) {
+        LOG_ERROR("iOS bridge: pkg not found at '{}'", pkg);
+        return -3;
+    }
+
+    // install_pkg takes the key by non-const reference (it rewrites it), so it
+    // needs a mutable copy rather than the caller's buffer.
+    std::string key(zrif);
+    bool ok = false;
+    LOG_INFO("iOS bridge: installing pkg '{}'", pkg);
+    try {
+        ok = install_pkg(pkg, *state.emuenv, key,
+            [progress, ctx](float pct) {
+                if (progress) progress(static_cast<unsigned int>(pct), ctx);
+            });
+    } catch (const std::exception &e) {
+        LOG_ERROR("iOS bridge: pkg install threw: {}", e.what());
+        return -4;
+    }
+    if (!ok) {
+        LOG_ERROR("iOS bridge: pkg install failed (bad key, or content this build cannot decrypt)");
+        return -5;
+    }
+    if (!app::scan_apps(*state.emuenv))
+        LOG_ERROR("iOS bridge: apps rescan after pkg install failed");
+    return 0;
 }
 
 // Import an already-extracted content folder (a game dumped off a real Vita and

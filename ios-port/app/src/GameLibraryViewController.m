@@ -414,6 +414,44 @@ static NSString *const kCellId = @"V3KGameCell";
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)promptForZRIFThenRetry:(NSURL *)url
+                         queue:(NSMutableArray<NSURL *> *)queue
+                          done:(NSInteger)done {
+    UIAlertController *ask = [UIAlertController
+        alertControllerWithTitle:@"Licence Key Needed"
+                         message:[NSString stringWithFormat:
+            @"%@ is an encrypted package. Paste its zRIF licence key to install it.\n\n"
+             "A zRIF is a long base64-looking string. It comes from the .rif/work.bin licence "
+             "issued for your own copy.", url.lastPathComponent]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ask addTextFieldWithConfigurationHandler:^(UITextField *f) {
+        f.placeholder = @"zRIF key";
+        f.autocorrectionType = UITextAutocorrectionTypeNo;
+        f.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        f.spellCheckingType = UITextSpellCheckingTypeNo;
+        f.clearButtonMode = UITextFieldViewModeWhileEditing;
+        // Almost nobody types one of these by hand.
+        f.text = UIPasteboard.generalPasteboard.string.length > 40
+               ? UIPasteboard.generalPasteboard.string : nil;
+    }];
+    [ask addAction:[UIAlertAction actionWithTitle:@"Skip" style:UIAlertActionStyleCancel
+        handler:^(UIAlertAction *_) {
+            [self installQueue:queue done:done lastError:
+                [NSError errorWithDomain:@"Vita3K" code:50 userInfo:@{
+                    NSLocalizedDescriptionKey: @"Skipped: that .pkg needs a zRIF licence key."}]];
+        }]];
+    [ask addAction:[UIAlertAction actionWithTitle:@"Install" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *_) {
+            NSString *key = [ask.textFields.firstObject.text
+                stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            Vita3KCore.shared.pendingZRIF = key;
+            // Put this file back at the front of the queue and run it again.
+            [queue insertObject:url atIndex:0];
+            [self installQueue:queue done:done lastError:nil];
+        }]];
+    [self presentViewController:ask animated:YES completion:nil];
+}
+
 #pragma mark UIDocumentPickerDelegate
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
@@ -453,6 +491,12 @@ static NSString *const kCellId = @"V3KGameCell";
         }
         completion:^(BOOL ok, NSString *titleId, NSError *error) {
             [hud dismissViewControllerAnimated:YES completion:^{
+                // An encrypted .pkg needs its zRIF key. Ask for it and retry
+                // this same file rather than counting it as a failure.
+                if (!ok && error.userInfo[@"V3KNeedsZRIF"]) {
+                    [self promptForZRIFThenRetry:url queue:queue done:done];
+                    return;
+                }
                 [self installQueue:queue done:done + (ok ? 1 : 0) lastError:ok ? lastError : error];
             }];
         }];

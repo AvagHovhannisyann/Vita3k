@@ -112,6 +112,11 @@ extern NSNotificationName const V3KJITStateDidChangeNotification;
 /// lists in the UI but fails to boot until this runs.
 - (void)rescanInstalledTitles;
 
+/// zRIF licence key to use for the NEXT .pkg install. An encrypted .pkg cannot
+/// be decrypted without one; installing without it fails with a V3KNeedsZRIF
+/// error so the UI can prompt. Cleared after each attempt.
+@property (nonatomic, copy, nullable) NSString *pendingZRIF;
+
 /// Copy a firmware PUP into the data tree. This only STAGES the file — call
 /// -installFirmwareAtURL:progress:completion: to actually install it.
 - (BOOL)importFirmwareAtURL:(NSURL *)url error:(NSError **_Nullable)error;

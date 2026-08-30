@@ -24,6 +24,9 @@ int  vita3k_ios_install_package(const char *a, void (*p)(unsigned int, void *), 
 }
 int  vita3k_ios_install_folder(const char *f) { (void)f; return -2; }
 int  vita3k_ios_rescan_apps(void) { return 0; }
+int  vita3k_ios_install_pkg(const char *p, const char *z, void (*cb)(unsigned int, void *), void *c) {
+    (void)p; (void)z; (void)cb; (void)c; return -2;
+}
 void vita3k_ios_shutdown(void) {}
 int  vita3k_ios_install_firmware(const char *pup_path, void (*progress)(unsigned int, void *),
                                  void *ctx, char *out_version, unsigned long out_cap) {
