@@ -18,6 +18,10 @@
 #include <string.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
+#include <mach-o/loader.h>
+#include <stdio.h>
 
 #ifndef V3K_BUILD_ID
 #define V3K_BUILD_ID "unstamped"
@@ -123,6 +127,99 @@ extern "C" void __cxa_throw(void *thrown, std::type_info *tinfo, void (*dest)(vo
 
 // 102: after CrashReporter's constructor (101) has set the log path, and still
 // ahead of the ordinary unprioritised initializers, one of which is the thrower.
-__attribute__((constructor(102))) static void v3k_install_terminate(void) {
+__attribute__((constructor(102))) void v3k_install_terminate(void) {
     g_prev = std::set_terminate(v3k_terminate);
+}
+
+
+// ---------------------------------------------------------------------------
+// Last resort, and the one that cannot be dodged.
+//
+// Neither previous net fired: dyld catches the escaping exception itself (that
+// is how it produces "c++ exception thrown in static initializer"), so
+// std::terminate never runs; and the throw originates inside a system dylib, so
+// the __cxa_throw defined above never sees it either.
+//
+// So stop trying to observe dyld and do the work instead. This constructor has
+// priority 103, which means the only initializers that have run so far are our
+// own (101 and 102) — every other entry in __mod_init_func is still pending.
+// Walk that list and call each one inside a try/catch. Whichever throws IS the
+// culprit, and here its address, its symbol and the exception are all readable.
+//
+// This is a diagnostic build: it reports and aborts rather than letting dyld run
+// the list a second time. The app cannot start today anyway, so naming the bug
+// is worth more than a launch that was never going to happen.
+// ---------------------------------------------------------------------------
+void v3k_install_terminate(void);
+
+__attribute__((constructor(103))) static void v3k_probe_initializers(void) {
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(0);
+    if (!mh) return;
+    unsigned long size = 0;
+    uint8_t *sect = getsectiondata(mh, "__DATA_CONST", "__mod_init_func", &size);
+    if (!sect) sect = getsectiondata(mh, "__DATA", "__mod_init_func", &size);
+    if (!sect || size < sizeof(uintptr_t)) return;
+
+    uintptr_t *fns = (uintptr_t *)sect;
+    size_t n = size / sizeof(uintptr_t);
+
+    const char *path = v3k_crash_log_path();
+    typedef void (*initfn)(void);
+
+    for (size_t i = 0; i < n; ++i) {
+        initfn f = (initfn)fns[i];
+        if (!f) continue;
+        // Skip our own three constructors; they have already run.
+        if ((void *)f == (void *)v3k_probe_initializers) continue;
+        if ((void *)f == (void *)v3k_install_terminate) continue;
+
+        const char *extype = nullptr, *exmsg = nullptr;
+        bool threw = false;
+        try {
+            f();
+        } catch (const std::exception &e) {
+            threw = true; exmsg = e.what();
+            const std::type_info *ti = abi::__cxa_current_exception_type();
+            extype = ti ? ti->name() : "unknown";
+        } catch (...) {
+            threw = true; extype = "(non-std exception)"; exmsg = "";
+        }
+        if (!threw) continue;
+
+        int fd = (path && *path) ? open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1;
+        if (fd >= 0) {
+            w(fd, "Vita3K iOS crash report\n=======================\nbuild: " V3K_BUILD_ID "\n\n");
+            w(fd, "FOUND THE THROWING STATIC INITIALIZER\n\n");
+            char buf[512];
+            Dl_info info;
+            memset(&info, 0, sizeof info);
+            int ok = dladdr((void *)f, &info);
+            snprintf(buf, sizeof buf, "initializer index: %zu of %zu\n", i, n); w(fd, buf);
+            snprintf(buf, sizeof buf, "function address:  %p\n", (void *)f); w(fd, buf);
+            snprintf(buf, sizeof buf, "image slide offset: 0x%llx\n",
+                     (unsigned long long)((uintptr_t)f - (uintptr_t)mh)); w(fd, buf);
+            if (ok && info.dli_sname) {
+                int st = 0;
+                char *dem = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &st);
+                w(fd, "symbol:            "); w(fd, (st == 0 && dem) ? dem : info.dli_sname); w(fd, "\n");
+                if (dem) free(dem);
+            } else {
+                w(fd, "symbol:            (not resolvable)\n");
+            }
+            if (ok && info.dli_fname) { w(fd, "image:             "); w(fd, info.dli_fname); w(fd, "\n"); }
+
+            w(fd, "\nexception type:    ");
+            if (extype) {
+                int st = 0;
+                char *dem = abi::__cxa_demangle(extype, nullptr, nullptr, &st);
+                w(fd, (st == 0 && dem) ? dem : extype);
+                if (dem) free(dem);
+            } else w(fd, "(unknown)");
+            w(fd, "\nmessage:           "); w(fd, (exmsg && *exmsg) ? exmsg : "(none)");
+            w(fd, "\n\n(end)\n");
+            fsync(fd);
+            close(fd);
+        }
+        abort();   // diagnostic build: stop here rather than let dyld re-run the list
+    }
 }
