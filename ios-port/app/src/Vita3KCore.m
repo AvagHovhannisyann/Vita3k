@@ -34,6 +34,13 @@ extern void vita3k_ios_send_buttons(uint32_t mask);
 extern void vita3k_ios_send_analog(float lx, float ly, float rx, float ry);
 extern void vita3k_ios_send_touch(unsigned long long finger_id, float nx, float ny, int phase);
 extern void vita3k_ios_set_touch_panel(int rear);
+extern int  vita3k_ios_install_package(const char *archive_path,
+                                       void (*progress)(unsigned int, void *), void *ctx,
+                                       char *out_title_id, unsigned long tid_cap,
+                                       char *out_title, unsigned long title_cap,
+                                       char *out_category, unsigned long cat_cap);
+extern int  vita3k_ios_install_folder(const char *folder_path);
+extern int  vita3k_ios_rescan_apps(void);
 extern void vita3k_ios_shutdown(void);
 extern int  vita3k_ios_install_firmware(const char *pup_path,
                                         void (*progress)(unsigned int, void *), void *ctx,
@@ -107,6 +114,8 @@ NSNotificationName const V3KJITStateDidChangeNotification = @"V3KJITStateDidChan
 // thread out of this one arena. dynarmic's intra-cache branches are B/BL
 // (+-128 MB), which is the ceiling that makes 128 MB the right ask.
 static const unsigned long kV3KArenaBytes = 128ul << 20;
+
+static void packageProgressThunk(unsigned int pct, void *ctx);
 
 @implementation V3KTitle @end
 
@@ -388,37 +397,122 @@ static unsigned long long dirSize(NSString *path) {
     return sfo ? V3KParseSfoData(sfo) : nil;
 }
 
+// DEADLOCK, fixed: this waited on a semaphore that could only be signalled from
+// a block dispatched to the MAIN queue — so calling it from the main thread (as
+// the document-picker delegate did) froze the app permanently on every import.
+// The work now runs inline on whatever thread calls this, with no hop to the
+// main queue at all. It still blocks its caller for the length of the install,
+// so UI code must use -installPackageAtURL:progress:completion: instead; this
+// remains only for scripted/synchronous callers.
 - (BOOL)importPackageAtURL:(NSURL *)url error:(NSError **)error {
-    __block BOOL ok = NO; __block NSError *e = nil;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    [self installPackageAtURL:url progress:nil completion:^(BOOL success, NSString *tid, NSError *err) {
-        ok = success; e = err; dispatch_semaphore_signal(sem);
-    }];
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-    if (!ok && error) *error = e;
-    return ok;
+    NSAssert(!NSThread.isMainThread,
+             @"importPackageAtURL: blocks; use installPackageAtURL:progress:completion: from UI code");
+    return [self performInstallOfURL:url progress:nil titleId:NULL error:error];
 }
+
+// The actual install, synchronous and queue-agnostic. Returns NO with *error set.
+- (BOOL)performInstallOfURL:(NSURL *)url
+                   progress:(void (^)(double))progress
+                    titleId:(NSString *__strong *)outTitleId
+                      error:(NSError **)error {
+    BOOL scoped = [url startAccessingSecurityScopedResource];
+    @try {
+        BOOL isDir = NO;
+        [NSFileManager.defaultManager fileExistsAtPath:url.path isDirectory:&isDir];
+
+        // Prefer the emulator's OWN installer whenever the core is linked. It
+        // routes by param.sfo CATEGORY (a patch to ux0:/patch, DLC to
+        // ux0:/addcont, themes to ux0:/theme), handles archives whose payload
+        // is nested under a folder, decrypts NoNpDrm content, installs the
+        // license, and rescans the apps list so the title is bootable in this
+        // same session. None of which the fallback below does.
+        if (self.coreLinked) {
+            if (isDir) {
+                int rc = vita3k_ios_install_folder(url.path.fileSystemRepresentation);
+                if (rc > 0) return YES;
+                if (error) *error = [self installErrorForCode:rc folder:YES];
+                return NO;
+            }
+            char tid[32] = {0}, title[256] = {0}, cat[16] = {0};
+            int rc = vita3k_ios_install_package(url.path.fileSystemRepresentation,
+                                                progress ? packageProgressThunk : NULL,
+                                                progress ? (__bridge void *)progress : NULL,
+                                                tid, sizeof tid, title, sizeof title, cat, sizeof cat);
+            if (rc > 0) {
+                if (outTitleId && tid[0]) *outTitleId = [NSString stringWithUTF8String:tid];
+                return YES;
+            }
+            if (error) *error = [self installErrorForCode:rc folder:NO];
+            return NO;
+        }
+
+        // UI-preview fallback: no core, so unzip a plain VPK ourselves. Note it
+        // extracts to a TEMPORARY directory first and only then replaces the
+        // destination — the previous version deleted the destination before it
+        // had even confirmed the file was a zip, so importing a mis-named file
+        // destroyed an already-installed game.
+        if (isDir) {
+            if (error) *error = [NSError errorWithDomain:@"Vita3K" code:30 userInfo:@{
+                NSLocalizedDescriptionKey: @"Folder import needs the emulator core, which is not in this build."}];
+            return NO;
+        }
+        NSData *sfo = V3KZipReadEntry(url.path, @"sce_sys/param.sfo");
+        NSDictionary *p = sfo ? V3KParseSfoData(sfo) : nil;
+        NSString *titleId = [p[@"TITLE_ID"] isKindOfClass:NSString.class] ? p[@"TITLE_ID"] : nil;
+        if (!titleId) titleId = url.lastPathComponent.stringByDeletingPathExtension;
+
+        NSString *staging = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                             [@"v3kinstall-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+        NSError *err = nil;
+        if (!V3KZipExtractAll(url.path, staging, progress, &err)) {
+            [NSFileManager.defaultManager removeItemAtPath:staging error:nil];
+            if (error) *error = err ?: [NSError errorWithDomain:@"Vita3K" code:31 userInfo:@{
+                NSLocalizedDescriptionKey: @"That file is not a readable .vpk (zip) archive."}];
+            return NO;
+        }
+        NSString *dest = [[self.dataRoot stringByAppendingPathComponent:@"ux0/app"]
+                          stringByAppendingPathComponent:titleId];
+        [NSFileManager.defaultManager createDirectoryAtPath:dest.stringByDeletingLastPathComponent
+                                withIntermediateDirectories:YES attributes:nil error:nil];
+        [NSFileManager.defaultManager removeItemAtPath:dest error:nil];   // now safe: input validated
+        BOOL moved = [NSFileManager.defaultManager moveItemAtPath:staging toPath:dest error:error];
+        if (!moved) [NSFileManager.defaultManager removeItemAtPath:staging error:nil];
+        if (moved && outTitleId) *outTitleId = titleId;
+        return moved;
+    } @finally {
+        if (scoped) [url stopAccessingSecurityScopedResource];
+    }
+}
+
+- (NSError *)installErrorForCode:(int)rc folder:(BOOL)folder {
+    NSString *why;
+    switch (rc) {
+        case -2: why = @"The emulator could not start up far enough to install anything. "
+                        "Install firmware first, then try again."; break;
+        case -3: why = folder ? @"That is not a folder." : @"The file could not be found."; break;
+        case -4: why = @"The installer failed while reading that file. If it is an encrypted .pkg, "
+                        "this build cannot decrypt it — see Logs & Crash Reports."; break;
+        case -5: why = @"Nothing in that package installed. It may be an unsupported format, a Vitamin "
+                        "dump, or encrypted content this build cannot decrypt."; break;
+        default: why = @"The package could not be installed. See Settings > Logs & Crash Reports."; break;
+    }
+    return [NSError errorWithDomain:@"Vita3K" code:(40 - rc) userInfo:@{ NSLocalizedDescriptionKey: why }];
+}
+
+/// Re-read ux0:/app in the core. Needed after a game is added by hand through
+/// the Files app, because the core builds its apps list once from a cache.
+- (void)rescanInstalledTitles { vita3k_ios_rescan_apps(); }
 
 - (void)installPackageAtURL:(NSURL *)url
                    progress:(void (^)(double))progress
                  completion:(void (^)(BOOL, NSString *, NSError *))completion {
-    NSString *root = self.dataRoot;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        BOOL scoped = [url startAccessingSecurityScopedResource];
-        // Determine target titleId from the VPK's own param.sfo.
-        NSString *titleId = nil;
-        NSData *sfo = V3KZipReadEntry(url.path, @"sce_sys/param.sfo");
-        NSDictionary *p = sfo ? V3KParseSfoData(sfo) : nil;
-        if ([p[@"TITLE_ID"] isKindOfClass:NSString.class]) titleId = p[@"TITLE_ID"];
-        if (!titleId) titleId = url.lastPathComponent.stringByDeletingPathExtension;
-
-        NSString *dest = [[root stringByAppendingPathComponent:@"ux0/app"] stringByAppendingPathComponent:titleId];
-        [NSFileManager.defaultManager removeItemAtPath:dest error:nil];
         NSError *err = nil;
-        BOOL ok = V3KZipExtractAll(url.path, dest, progress, &err);
-        if (scoped) [url stopAccessingSecurityScopedResource];
-        NSString *tid = titleId;
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, ok ? tid : nil, err); });
+        NSString *tid = nil;
+        BOOL ok = [self performInstallOfURL:url progress:progress titleId:&tid error:&err];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(ok, ok ? tid : nil, err);
+        });
     });
 }
 
@@ -432,7 +526,13 @@ static unsigned long long dirSize(NSString *path) {
     return ok;   // Staged only — -installFirmwareAtURL:... does the real work.
 }
 
-// Trampoline for the C progress callback: `ctx` is the Objective-C block.
+// Trampolines for the C progress callbacks: `ctx` is the Objective-C block.
+static void packageProgressThunk(unsigned int pct, void *ctx) {
+    if (!ctx) return;
+    void (^blk)(double) = (__bridge void (^)(double))ctx;
+    blk(pct / 100.0);
+}
+
 static void firmwareProgressThunk(unsigned int pct, void *ctx) {
     if (!ctx) return;
     void (^blk)(double) = (__bridge void (^)(double))ctx;

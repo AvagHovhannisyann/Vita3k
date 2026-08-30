@@ -107,6 +107,11 @@ extern NSNotificationName const V3KJITStateDidChangeNotification;
 - (void)installPackageAtURL:(NSURL *)url
                    progress:(void (^_Nullable)(double))progress
                  completion:(void (^)(BOOL ok, NSString *_Nullable titleId, NSError *_Nullable error))completion;
+/// Re-read ux0:/app in the emulator core. The core builds its apps list once
+/// per process from a cache, so a game added by hand through the Files app
+/// lists in the UI but fails to boot until this runs.
+- (void)rescanInstalledTitles;
+
 /// Copy a firmware PUP into the data tree. This only STAGES the file — call
 /// -installFirmwareAtURL:progress:completion: to actually install it.
 - (BOOL)importFirmwareAtURL:(NSURL *)url error:(NSError **_Nullable)error;

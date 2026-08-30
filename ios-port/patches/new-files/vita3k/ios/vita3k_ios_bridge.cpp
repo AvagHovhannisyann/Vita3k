@@ -61,6 +61,7 @@
 #include <emuenv/app_launch_request.h>
 #include <emuenv/state.h>
 #include <modules/module_parent.h>
+#include <archive.h>
 #include <packages/functions.h>
 #include <touch/functions.h>
 #include <touch/state.h>
@@ -509,6 +510,133 @@ void vita3k_ios_set_touch_panel(int rear) {
     if (!state.emuenv)
         return;
     state.emuenv->touch.touchscreen_port = rear ? SCE_TOUCH_PORT_BACK : SCE_TOUCH_PORT_FRONT;
+}
+
+// Install a .vpk / .zip / .vci using VITA3K'S OWN INSTALLER rather than the
+// front end's hand-rolled unzip.
+//
+// This matters more than it looks. install_archive() is what routes content by
+// its param.sfo CATEGORY -- a patch ("gp") to ux0:/patch, DLC/themes ("ac") to
+// ux0:/addcont or ux0:/theme, everything else to ux0:/app -- strips a nested
+// content-path prefix so repacks that bury their payload under a folder still
+// land correctly, rejects Vitamin dumps, decrypts NoNpDrm content, copies the
+// license, and rescans the apps list afterwards. The front end's own extractor
+// did none of that: it wrote every archive to ux0:/app/<TITLE_ID> after
+// deleting whatever was there, so installing a patch silently destroyed the
+// base game it was meant to patch.
+//
+// Returns the number of contents installed (> 0 on success), or negative on
+// error. The first installed content's ids are copied into the out buffers.
+int vita3k_ios_install_package(const char *archive_path,
+                               void (*progress)(unsigned int, void *), void *ctx,
+                               char *out_title_id, unsigned long tid_cap,
+                               char *out_title, unsigned long title_cap,
+                               char *out_category, unsigned long cat_cap) {
+    const auto clear = [](char *b, unsigned long cap) { if (b && cap) b[0] = '\0'; };
+    clear(out_title_id, tid_cap); clear(out_title, title_cap); clear(out_category, cat_cap);
+    if (!archive_path || !*archive_path)
+        return -1;
+
+    BridgeState &state = bridge_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!one_time_init_locked(state) || !state.emuenv)
+        return -2;
+
+    const fs::path archive = fs_utils::utf8_to_path(std::string(archive_path));
+    boost::system::error_code ec;
+    if (!fs::exists(archive, ec)) {
+        LOG_ERROR("iOS bridge: package not found at '{}'", archive);
+        return -3;
+    }
+
+    LOG_INFO("iOS bridge: installing package '{}'", archive);
+    std::vector<ContentInfo> installed;
+    try {
+        installed = install_archive(*state.emuenv, archive,
+            [progress, ctx](ArchiveContents c) {
+                if (progress && c.progress.has_value())
+                    progress(static_cast<unsigned int>(*c.progress), ctx);
+            },
+            // Reinstall prompt: there is no modal to show from here, and the
+            // user already chose to import this file, so accept.
+            [](const std::string &title, const std::string &title_id) {
+                LOG_INFO("iOS bridge: reinstalling {} ({})", title, title_id);
+                return true;
+            });
+    } catch (const std::exception &e) {
+        LOG_ERROR("iOS bridge: package install threw: {}", e.what());
+        return -4;
+    }
+
+    int ok_count = 0;
+    for (const ContentInfo &c : installed) {
+        if (!c.state)
+            continue;
+        if (ok_count == 0) {
+            const auto copy = [](char *b, unsigned long cap, const std::string &v) {
+                if (b && cap) std::snprintf(b, static_cast<size_t>(cap), "%s", v.c_str());
+            };
+            copy(out_title_id, tid_cap, c.title_id);
+            copy(out_title, title_cap, c.title);
+            copy(out_category, cat_cap, c.category);
+        }
+        ok_count++;
+        LOG_INFO("iOS bridge: installed {} [{}] category '{}' -> {}",
+            c.title, c.title_id, c.category, c.path);
+    }
+
+    if (ok_count == 0) {
+        LOG_ERROR("iOS bridge: nothing in '{}' installed successfully", archive);
+        return -5;
+    }
+
+    // Rescan so the title can be booted in THIS session. init_apps_list() reads
+    // a cache and would return the pre-install list; scan_apps() re-reads disk.
+    if (!app::scan_apps(*state.emuenv))
+        LOG_ERROR("iOS bridge: apps rescan after install failed");
+    return ok_count;
+}
+
+// Import an already-extracted content folder (a game dumped off a real Vita and
+// copied in through the Files app). Upstream exposes this as a drag-and-drop /
+// --content-path install; there was no route to it at all on iOS.
+int vita3k_ios_install_folder(const char *folder_path) {
+    if (!folder_path || !*folder_path)
+        return -1;
+    BridgeState &state = bridge_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!one_time_init_locked(state) || !state.emuenv)
+        return -2;
+
+    const fs::path folder = fs_utils::utf8_to_path(std::string(folder_path));
+    boost::system::error_code ec;
+    if (!fs::is_directory(folder, ec))
+        return -3;
+
+    uint32_t n = 0;
+    try {
+        n = install_contents(*state.emuenv, folder);
+    } catch (const std::exception &e) {
+        LOG_ERROR("iOS bridge: folder install threw: {}", e.what());
+        return -4;
+    }
+    if (n == 0)
+        return -5;
+    if (!app::scan_apps(*state.emuenv))
+        LOG_ERROR("iOS bridge: apps rescan after folder install failed");
+    return static_cast<int>(n);
+}
+
+// Re-read ux0:/app from disk. Needed after the user adds a game by hand through
+// the Files app: the core builds its apps list once per process from a cache,
+// so without this a folder pasted in later lists in the UI but fails to boot
+// with "not found in apps list".
+int vita3k_ios_rescan_apps(void) {
+    BridgeState &state = bridge_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.emuenv)
+        return 0;          // nothing initialised yet; the first init will scan
+    return app::scan_apps(*state.emuenv) ? 1 : -1;
 }
 
 void vita3k_ios_shutdown(void) {

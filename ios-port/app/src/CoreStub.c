@@ -13,6 +13,17 @@ void vita3k_ios_send_touch(unsigned long long id, float nx, float ny, int phase)
     (void)id; (void)nx; (void)ny; (void)phase;
 }
 void vita3k_ios_set_touch_panel(int rear) { (void)rear; }
+int  vita3k_ios_install_package(const char *a, void (*p)(unsigned int, void *), void *c,
+                                char *t, unsigned long tc, char *n, unsigned long nc,
+                                char *g, unsigned long gc) {
+    (void)a; (void)p; (void)c;
+    if (t && tc) t[0] = 0;
+    if (n && nc) n[0] = 0;
+    if (g && gc) g[0] = 0;
+    return -2;                                   // no core: nothing to install into
+}
+int  vita3k_ios_install_folder(const char *f) { (void)f; return -2; }
+int  vita3k_ios_rescan_apps(void) { return 0; }
 void vita3k_ios_shutdown(void) {}
 int  vita3k_ios_install_firmware(const char *pup_path, void (*progress)(unsigned int, void *),
                                  void *ctx, char *out_version, unsigned long out_cap) {

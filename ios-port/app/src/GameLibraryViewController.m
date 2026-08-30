@@ -130,7 +130,22 @@ static NSString *const kCellId = @"V3KGameCell";
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self reloadTitles];
+    // Adding a game by hand means leaving the app for Files and coming back —
+    // which does not re-run viewWillAppear if the Library was already on screen.
+    // Without this the most likely way anyone gets a game on shows "No games yet".
+    [NSNotificationCenter.defaultCenter removeObserver:self
+        name:UIApplicationDidBecomeActiveNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(reloadTitles)
+        name:UIApplicationDidBecomeActiveNotification object:nil];
 }
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    [NSNotificationCenter.defaultCenter removeObserver:self
+        name:UIApplicationDidBecomeActiveNotification object:nil];
+}
+
+- (void)dealloc { [NSNotificationCenter.defaultCenter removeObserver:self]; }
 
 - (void)viewWillTransitionToSize:(CGSize)size
        withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
@@ -223,7 +238,12 @@ static NSString *const kCellId = @"V3KGameCell";
 
     UILabel *subtitle = [[UILabel alloc] initWithFrame:CGRectZero];
     subtitle.translatesAutoresizingMaskIntoConstraints = NO;
-    subtitle.text = @"Import a .vpk or .pkg package to get started.";
+    // Naming the Files route matters: copying an already-dumped game folder in
+    // is the most likely way anyone actually gets a game onto this, and nothing
+    // in the UI used to mention that it was possible.
+    subtitle.text = @"Tap + to install a .vpk.\n\nOr, in the Files app, open "
+                     "On My iPhone/iPad \u203a Vita3K \u203a vita3k \u203a ux0 \u203a app "
+                     "and copy a dumped game folder there \u2014 it appears here when you come back.";
     subtitle.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightRegular];
     subtitle.textColor = V3KSubtext();
     subtitle.textAlignment = NSTextAlignmentCenter;
@@ -291,6 +311,10 @@ static NSString *const kCellId = @"V3KGameCell";
 #pragma mark Data
 
 - (void)reloadTitles {
+    // Tell the core to re-read ux0:/app too, not just the UI. It builds its
+    // apps list once per process from a cache, so a folder pasted in through
+    // Files would list here and then fail to boot with "not found in apps list".
+    [[Vita3KCore shared] rescanInstalledTitles];
     self.titles = [[Vita3KCore shared] installedTitles] ?: @[];
     self.statusLabel.text = [[Vita3KCore shared] statusLine];
     BOOL empty = (self.titles.count == 0);
@@ -394,25 +418,44 @@ static NSString *const kCellId = @"V3KGameCell";
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
     didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    NSError *lastError = nil;
-    NSInteger imported = 0;
-    for (NSURL *url in urls) {
-        BOOL scoped = [url startAccessingSecurityScopedResource];
-        NSError *error = nil;
-        BOOL ok = [[Vita3KCore shared] importPackageAtURL:url error:&error];
-        if (scoped) {
-            [url stopAccessingSecurityScopedResource];
-        }
-        if (ok) {
-            imported++;
-        } else {
-            lastError = error;
-        }
+    if (urls.count == 0) return;
+    // This used to call the synchronous importer straight from this delegate,
+    // on the main thread — and that importer waited on a semaphore only ever
+    // signalled from a block dispatched BACK to the main queue. Every single
+    // import deadlocked the app permanently. Install asynchronously instead,
+    // one file at a time, behind a progress alert.
+    [self installQueue:[urls mutableCopy] done:0 lastError:nil];
+}
+
+- (void)installQueue:(NSMutableArray<NSURL *> *)queue
+                done:(NSInteger)done
+           lastError:(NSError *)lastError {
+    if (queue.count == 0) {
+        [self reloadTitles];
+        if (done == 0 && lastError) [self presentErrorWithTitle:@"Import Failed" error:lastError];
+        return;
     }
-    [self reloadTitles];
-    if (imported == 0 && lastError) {
-        [self presentErrorWithTitle:@"Import Failed" error:lastError];
-    }
+    NSURL *url = queue.firstObject;
+    [queue removeObjectAtIndex:0];
+
+    UIAlertController *hud = [UIAlertController
+        alertControllerWithTitle:@"Installing"
+                         message:[NSString stringWithFormat:@"%@\n0%%", url.lastPathComponent]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:hud animated:YES completion:nil];
+
+    [[Vita3KCore shared] installPackageAtURL:url
+        progress:^(double f) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                hud.message = [NSString stringWithFormat:@"%@\n%d%%",
+                               url.lastPathComponent, (int)lround(f * 100)];
+            });
+        }
+        completion:^(BOOL ok, NSString *titleId, NSError *error) {
+            [hud dismissViewControllerAnimated:YES completion:^{
+                [self installQueue:queue done:done + (ok ? 1 : 0) lastError:ok ? lastError : error];
+            }];
+        }];
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
