@@ -237,3 +237,81 @@ is the least of it.
 ## 11. Path to a fully-running port
 
 Build Vita3K's C++ sources for `arm64-apple-ios` (CMake iOS toolchain) with MoltenVK for the Vulkan renderer and Dynarmic's AArch64 backend; replace the Objective-C shell's `main` with the `SDL_main`/`vita3k_frontend` entry; keep this package's `Info.plist`, reused `shaders-builtin/`, icons, `get-task-allow` entitlement, and JIT bring-up. The Android in-process hooks (`file_redirect`, `gsl_alloc`, loader interposition) map to: iOS sandbox `Documents/` paths, Metal/MoltenVK memory management, and the StikDebug external-debugger JIT handshake this build is already wired for.
+
+---
+
+# Part II — from "a path exists" to a real emulator build
+
+Everything above was written before the port existed. What follows is what was
+actually built, and what is and is not proven. Section 11's plan is done.
+
+## 12. The real port
+
+`ios-port/` cross-builds Vita3K for `arm64-apple-ios` **on Linux**, with clang +
+`lld -flavor darwin` and a real iPhoneOS 16.5 SDK. No Xcode, no macOS. All 28
+third-party dependencies (FFmpeg, OpenSSL, curl, SDL3, MoltenVK, SPIRV-Cross,
+glslang, capstone, boost, dynarmic…) and all 38 Vita3K core modules build; the
+app links to a single 145 MB arm64 Mach-O with no undefined symbols. See
+`ios-port/PORT_STATUS.md`.
+
+The front end is a new native UIKit app (`ios-port/app/`) — the Android
+Kotlin/Compose shell has no iOS equivalent — with a library, game detail,
+settings, firmware install, controller mapping, an on-screen Vita gamepad, JIT
+diagnostics, and a log/crash viewer.
+
+## 13. What the device actually proved about JIT
+
+Measured on the user's iPad, iPadOS 27.0.0:
+
+* `CS_DEBUGGED` alone is **not** enough. With StikDebug merely attached the
+  process showed `0x32003005` and every attempt to execute self-written memory
+  still `SIGBUS`ed — including a bare `bti c; ret` page. `MAP_JIT` gave `EPERM`.
+* **Root cause:** StikDebug looks up a JIT *script* for the target bundle id.
+  With none bound it does a bare attach: the process gets `CS_DEBUGGED` and
+  nothing else, so no executable region is ever prepared. Vita3K is not in
+  StikDebug's `AutoScriptAssignments`. Binding `universal.js` — which the app now
+  does in one tap via `stikdebug://enable-jit?…&script-name=universal.js` — fixes
+  it with no upstream change.
+* With the script bound, the JIT26 `brk #0xf00d` handshake **works**:
+  `JIT WORKS ✓ — executed emitted code`, 14:35.
+* At 14:37 the same test failed with `no region (faulted)`. Not a regression —
+  the handshake is **one-shot per attach**. `JIT26Detach()` closes the window
+  permanently.
+
+That last point is the constraint the whole design turns on, and it is why the
+JIT allocator was rewritten. See `ios-port/JIT_ARENA_DESIGN.md`.
+
+## 14. Four failures caught before the device saw them
+
+Each of these would have presented to the user as "it doesn't work", with no
+diagnosis available:
+
+1. **One code cache per guest thread, not one per process.** Vita3K calls
+   `init_cpu` per thread (`kernel/src/thread.cpp:74`) and each dynarmic JIT wants
+   its own 128 MiB cache. A single arena could never have satisfied 10–30 of
+   those. The arena is now sub-allocated into 4 MB per-thread slots.
+2. **The Vulkan loader.** vulkan-hpp's `init()` `dlopen`s `libvulkan.dylib` and
+   throws when it is missing. MoltenVK is linked *statically* on iOS, so it is
+   always missing: the renderer would have thrown before drawing a frame. The
+   dispatcher is now seeded from the static library's own `vkGetInstanceProcAddr`.
+3. **Firmware was never installed.** The UI copied the PUP into a staging folder
+   and a comment claimed the core would install it later. Nothing read that
+   folder. `vs0` would have stayed empty and every commercial title would have
+   died on a missing module.
+4. **The diagnostics screen burned the one attach it had**, by preparing a
+   throwaway probe region instead of the arena the emulator actually needs.
+
+## 15. Honest status
+
+Proven: it compiles, it links, the pieces are present in the shipped binary, the
+entitlement survives signing, and the JIT26 handshake executes real emitted code
+on iPadOS 27.
+
+Not proven — no session in this project has had device access:
+
+* whether StikDebug will bless a **128 MB** region (only 1 MB was ever tested;
+  the code halves to 64/32/16 MB on refusal),
+* whether **4 MB × 32 slots** suits a real game's thread count,
+* whether the core boots at all.
+
+Nothing in this log should be read as a claim that a game has run. It has not.
