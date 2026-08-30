@@ -94,10 +94,13 @@ static void *prepare_region_guarded(unsigned long len, double seconds, const cha
 
 NSNotificationName const V3KJITStateDidChangeNotification = @"V3KJITStateDidChange";
 
-// Default arena size. Desktop dynarmic uses a 128 MB code cache; on a handheld
-// we ask for 96 MB and the core halves the request if the debugger declines it.
-// Whatever we get is ALL the executable memory this process will ever have.
-static const unsigned long kV3KArenaBytes = 96ul << 20;
+// Whatever we get here is ALL the executable memory this process will ever have,
+// so ask for the maximum that is useful and let the core halve the request if
+// the debugger declines it. 128 MB is not one code cache: Vita3K builds a
+// dynarmic JIT per guest thread, and the core sub-allocates a fixed slot per
+// thread out of this one arena. dynarmic's intra-cache branches are B/BL
+// (+-128 MB), which is the ceiling that makes 128 MB the right ask.
+static const unsigned long kV3KArenaBytes = 128ul << 20;
 
 @implementation V3KTitle @end
 
