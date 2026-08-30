@@ -69,7 +69,7 @@ clang++ -std=c++23 -stdlib=libc++ -isysroot "$SDK" -target arm64-apple-ios14.0 \
   -framework GameController -framework CoreHaptics -framework CoreMedia \
   -framework CoreVideo -framework Security -framework SystemConfiguration \
   -framework IOSurface -framework CoreBluetooth -framework CoreMotion \
-  -framework OpenGLES -framework VideoToolbox -framework UniformTypeIdentifiers \
+  -framework VideoToolbox -framework UniformTypeIdentifiers \
   -Wl,-U,'_OBJC_CLASS_$_MTLResidencySetDescriptor' \
   -lz -lc++ -liconv -lcompression -lbz2 \
   -o "$OUT/Vita3K"

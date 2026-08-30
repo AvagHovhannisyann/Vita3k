@@ -8,6 +8,19 @@
 #import <stdlib.h>
 #import <pthread.h>
 #import <sys/stat.h>
+#import <mach-o/dyld_images.h>
+#import <dlfcn.h>
+
+// Not public API, but present in libdyld on every Apple platform. dyld records
+// exactly why it refused to load an image here, then aborts — and the message
+// only ever goes to a console we cannot read on a sideloaded device. Reading it
+// out turns "dyld aborted" into "dyld aborted because symbol X, expected in
+// library Y, was missing".
+// Resolved once at startup with dlsym rather than linked: it is absent from the
+// SDK stub we link against, and dlsym is not async-signal-safe so it must not be
+// called from the handler itself.
+typedef const struct dyld_all_image_infos *(*v3k_aii_fn)(void);
+static v3k_aii_fn g_dyld_aii = NULL;
 
 // A signal handler may only call async-signal-safe functions, so everything
 // below writes with write(2) and formats by hand. The path is resolved and
@@ -81,6 +94,30 @@ static void handler(int sig, siginfo_t *info, void *uap) {
 
         w(fd, "\nJIT arena: ");
         w(fd, v3k_ios_jit_status());
+
+        // If the loader is what aborted, this is the whole answer.
+        const struct dyld_all_image_infos *aii = g_dyld_aii ? g_dyld_aii() : NULL;
+        if (aii) {
+            if (aii->errorMessage && *aii->errorMessage) {
+                w(fd, "\n\ndyld error: "); w(fd, aii->errorMessage);
+            }
+            if (aii->errorKind) {
+                w(fd, "\ndyld errorKind: "); wdec(fd, (long long)aii->errorKind);
+                w(fd, aii->errorKind == 1 ? "  (missing symbol)"
+                    : aii->errorKind == 2 ? "  (dylib missing)"
+                    : aii->errorKind == 3 ? "  (dylib wrong version)"
+                    : aii->errorKind == 4 ? "  (dylib wrong arch)" : "");
+            }
+            if (aii->errorSymbol && *aii->errorSymbol) {
+                w(fd, "\ndyld missing symbol: "); w(fd, aii->errorSymbol);
+            }
+            if (aii->errorClientOfDylibPath && *aii->errorClientOfDylibPath) {
+                w(fd, "\ndyld referenced from: "); w(fd, aii->errorClientOfDylibPath);
+            }
+            if (aii->errorTargetDylibPath && *aii->errorTargetDylibPath) {
+                w(fd, "\ndyld expected in: "); w(fd, aii->errorTargetDylibPath);
+            }
+        }
         w(fd, "\n\nbacktrace:\n");
         void *frames[64];
         int n = backtrace(frames, 64);
@@ -128,6 +165,8 @@ __attribute__((constructor(101))) static void v3k_install_crash_reporter_early(v
     snprintf(dir, sizeof dir, "%s/Documents/vita3k", home);
     mkdir(dir, 0755);                       // harmless if it already exists
     snprintf(g_crashPath, sizeof g_crashPath, "%s/crash.log", dir);
+
+    g_dyld_aii = (v3k_aii_fn)dlsym(RTLD_DEFAULT, "_dyld_get_all_image_infos");
 
     static char altstack[SIGSTKSZ * 2];
     stack_t ss = { .ss_sp = altstack, .ss_size = sizeof altstack, .ss_flags = 0 };
