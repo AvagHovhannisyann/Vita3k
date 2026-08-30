@@ -82,6 +82,9 @@
 
 @end
 
+extern int v3k_in_static_init;   // see CxxTerminate.mm
+
 int main(int argc, char *argv[]) {
+    v3k_in_static_init = 0;      // past load; ordinary exceptions are not our business
     @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(AppDelegate.class)); }
 }

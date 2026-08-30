@@ -279,6 +279,9 @@ void V3KInstallCrashReporter(NSString *directory) {
     NSSetUncaughtExceptionHandler(&uncaught);
 }
 
+// Exposed for CxxTerminate.mm, which cannot include this file's ObjC headers.
+const char *v3k_crash_log_path(void) { return g_crashPath; }
+
 NSString *V3KCrashReportPath(void) {
     return [NSString stringWithUTF8String:g_crashPath];
 }

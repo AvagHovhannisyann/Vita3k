@@ -24,7 +24,18 @@ for m in "$HERE"/src/*.m; do
   clang -target arm64-apple-ios14.0 -isysroot "$SDK" -fobjc-arc -fmodules \
         -Wall -Wno-unused -O2 -I"$HERE/src" -c "$m" -o "$o"
   OBJS+=("$o")
-done   # NOTE: src/*.c (CoreStub.c) deliberately not compiled — the real bridge provides those symbols.
+done
+
+# Objective-C++ sources (the std::terminate reporter needs the C++ ABI).
+for mm in "$HERE"/src/*.mm; do
+  [ -e "$mm" ] || continue
+  o="$OUT/obj/$(basename "${mm%.mm}").o"
+  clang++ -target arm64-apple-ios14.0 -isysroot "$SDK" -std=c++17 -stdlib=libc++ \
+        -fobjc-arc -Wall -Wno-unused -O2 -I"$HERE/src" -c "$mm" -o "$o"
+  OBJS+=("$o")
+done
+
+# NOTE: src/*.c (CoreStub.c) deliberately not compiled — the real bridge provides those symbols.
 
 # The JIT-arena fallback goes into its own archive, linked LAST. A linker only
 # pulls an archive member to resolve a still-undefined symbol, so the core's
