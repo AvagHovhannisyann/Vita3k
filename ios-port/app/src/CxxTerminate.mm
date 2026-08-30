@@ -22,6 +22,7 @@
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 #include <stdio.h>
+#include <sys/mman.h>
 
 #ifndef V3K_BUILD_ID
 #define V3K_BUILD_ID "unstamped"
@@ -152,6 +153,9 @@ __attribute__((constructor(102))) void v3k_install_terminate(void) {
 // ---------------------------------------------------------------------------
 void v3k_install_terminate(void);
 
+// Replaces an initializer once it has run, so dyld's second pass is inert.
+extern "C" void v3k_noop_initializer(void) {}
+
 __attribute__((constructor(103))) static void v3k_probe_initializers(void) {
     const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(0);
     if (!mh) return;
@@ -166,6 +170,21 @@ __attribute__((constructor(103))) static void v3k_probe_initializers(void) {
     const char *path = v3k_crash_log_path();
     typedef void (*initfn)(void);
 
+    // Run each initializer EXACTLY once.
+    //
+    // B8 established that none of them throws on a clean run — the probe walked
+    // all of them without catching anything. What broke B8 was the second pass:
+    // dyld resumes this list after we return and runs every entry AGAIN, and
+    // re-entering an initializer that takes a lock or a std::once_flag either
+    // deadlocks (black screen, no crash) or trips an assert (abort() called).
+    //
+    // So neutralise each entry as it completes: overwrite it with a no-op, and
+    // dyld's pass becomes 323 calls that do nothing. __DATA_CONST is not yet
+    // read-only this early, but mprotect it anyway rather than assume.
+    uintptr_t pageStart = (uintptr_t)sect & ~(uintptr_t)(getpagesize() - 1);
+    size_t protLen = (uintptr_t)sect + size - pageStart;
+    bool writable = (mprotect((void *)pageStart, protLen, PROT_READ | PROT_WRITE) == 0);
+
     for (size_t i = 0; i < n; ++i) {
         initfn f = (initfn)fns[i];
         if (!f) continue;
@@ -177,6 +196,7 @@ __attribute__((constructor(103))) static void v3k_probe_initializers(void) {
         bool threw = false;
         try {
             f();
+            if (writable) fns[i] = (uintptr_t)&v3k_noop_initializer;   // dyld must not re-run it
         } catch (const std::exception &e) {
             threw = true; exmsg = e.what();
             const std::type_info *ti = abi::__cxa_current_exception_type();
